@@ -26,6 +26,7 @@ dynamic = ["version"]
 
 [tool.setuptools]
 packages = ["dataretrieval", "dataretrieval.codes"]
+package-data.dataretrieval = ["py.typed"]
 
 [project.optional-dependencies]
 test = [
