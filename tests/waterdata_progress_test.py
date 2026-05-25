@@ -65,6 +65,26 @@ def test_page_count_is_pluralized():
     assert "2 pages" in stream.getvalue()
 
 
+def test_note_retry_renders_then_clears_on_next_page():
+    stream = io.StringIO()
+    reporter = ProgressReporter(stream=stream, enabled=True)
+    reporter.set_chunks(3)
+    reporter.start_chunk(1)
+    reporter.note_retry(attempt=2, wait=8.0)
+    assert "retrying (attempt 2, waiting 8s)" in stream.getvalue()
+    # The next page redraws without the note (last frame is after the
+    # final carriage return).
+    reporter.add_page(rows=5)
+    assert "retrying" not in stream.getvalue().rsplit("\r", 1)[-1]
+
+
+def test_note_retry_is_noop_when_disabled():
+    stream = io.StringIO()
+    reporter = ProgressReporter(stream=stream, enabled=False)
+    reporter.note_retry(attempt=1, wait=1.0)
+    assert stream.getvalue() == ""
+
+
 def test_chunk_segment_only_shown_when_multiple_chunks():
     single = io.StringIO()
     reporter = ProgressReporter(stream=single, enabled=True)
@@ -363,3 +383,124 @@ def test_broken_progress_stream_does_not_truncate_pagination():
         df, _ = _walk_pages(geopd=False, req=req, client=client)
 
     assert len(df) == 2  # both pages returned despite the broken progress stream
+
+
+# -- async path integration ----------------------------------------------------
+
+
+def test_paginate_async_reports_pages_through_active_reporter(monkeypatch):
+    """The async paginate path must drive the same progress reporter the
+    sync path does. Pages and rate-limit updates from each completed
+    page should land via the active ``ProgressReporter``, exactly as
+    they would on ``_walk_pages``."""
+    import asyncio
+
+    from dataretrieval.waterdata.utils import _paginate_async
+
+    resp1 = _resp(
+        [{"id": "1", "properties": {"v": "a"}}],
+        next_url="https://example.com/p2",
+        rate_remaining="4999",
+    )
+    resp2 = _resp([{"id": "2", "properties": {"v": "b"}}], rate_remaining="4998")
+
+    async def parse_response(resp):
+        body = resp.json()
+        nxt = next(
+            (link["href"] for link in body["links"] if link["rel"] == "next"), None
+        )
+        return mock.MagicMock(empty=False, __len__=lambda self: 1), nxt
+
+    # _paginate_async expects parse_response to be sync, like the sync path.
+    def parse_sync(resp):
+        body = resp.json()
+        nxt = next(
+            (link["href"] for link in body["links"] if link["rel"] == "next"), None
+        )
+        import pandas as pd
+
+        return pd.DataFrame(body["features"]), nxt
+
+    async def follow_up(cursor, sess):
+        return resp2
+
+    client = mock.AsyncMock(spec=httpx.AsyncClient)
+    client.send.return_value = resp1
+
+    req = mock.MagicMock(spec=httpx.Request)
+    req.method = "GET"
+    req.headers = {}
+    req.url = "https://example.com/p1"
+
+    stream = io.StringIO()
+
+    async def run():
+        with progress_context(service="continuous", stream=stream, enabled=True):
+            df, _ = await _paginate_async(
+                req,
+                parse_response=parse_sync,
+                follow_up=follow_up,
+                client=client,
+            )
+        return df
+
+    df = asyncio.run(run())
+    assert len(df) == 2
+    out = stream.getvalue()
+    assert "Retrieving: continuous ·" in out
+    assert "2 pages" in out
+    assert "4,998 requests remaining" in out
+    assert out.endswith("\n")
+
+
+def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
+    """``_fan_out_async`` records ``plan.total`` on the active reporter
+    so the progress line knows how many sub-requests are in flight.
+    It deliberately does NOT call ``start_chunk`` (which would be
+    misleading under parallel fan-out — chunks fire concurrently)."""
+    import asyncio
+
+    import pandas as pd
+
+    from dataretrieval.waterdata.chunking import ChunkPlan, _fan_out_async
+
+    # Fake build_request whose URL length scales with the sites list,
+    # mirroring the planner's _request_bytes contract. _FakeReq has the
+    # same shape as httpx.Request for sizing purposes.
+    class _FakeReq:
+        __slots__ = ("url", "content")
+
+        def __init__(self, url):
+            self.url = url
+            self.content = b""
+
+    def build(*, sites):
+        return _FakeReq("x" * (200 + len(",".join(sites))))
+
+    sites = ["S" * 10 + str(i) for i in range(4)]
+    plan = ChunkPlan({"sites": sites}, build, url_limit=240)
+    assert plan.total > 1, "test setup error: plan must fan out"
+
+    async def fetch_async(args):
+        return pd.DataFrame({"id": [",".join(args["sites"])]}), mock.Mock(
+            elapsed=__import__("datetime").timedelta(seconds=0.01),
+            headers={"x-ratelimit-remaining": "999"},
+        )
+
+    def fetch_once(args):  # noqa: ARG001 — never invoked on the happy parallel path
+        raise AssertionError("sync fetch must not run in this test")
+
+    stream = io.StringIO()
+
+    async def run():
+        with progress_context(service="daily", stream=stream, enabled=True) as rep:
+            await _fan_out_async(plan, fetch_once, fetch_async, max_concurrent=4)
+            return rep.total_chunks, rep.current_chunk
+
+    total_recorded, current_recorded = asyncio.run(run())
+    assert total_recorded == plan.total
+    # Each sub-request that completes bumps current_chunk via
+    # start_chunk(len(completed)), so by the time the gather finishes
+    # current_chunk reflects the total number of successful chunks —
+    # plan.total in the all-success case.
+    assert current_recorded == plan.total

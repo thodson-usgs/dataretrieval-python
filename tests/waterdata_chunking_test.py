@@ -15,11 +15,13 @@ surprises (``%``, ``+``, ``/``, ``&``, …) can't pass against a fake
 and then fail in production.
 """
 
+import asyncio
 import datetime
 import sys
 from unittest import mock
 from urllib.parse import quote_plus
 
+import httpx
 import pandas as pd
 import pytest
 
@@ -36,10 +38,14 @@ from dataretrieval.waterdata.chunking import (
     QuotaExhausted,
     RateLimited,
     RequestTooLarge,
+    RetryPolicy,
     ServiceInterrupted,
     ServiceUnavailable,
     _chunked_client,
     _extract_axes,
+    _retry_async,
+    _retry_sync,
+    _retryable,
     multi_value_chunked,
 )
 from dataretrieval.waterdata.utils import _construct_api_requests
@@ -1202,6 +1208,195 @@ def test_iter_sub_args_passthrough_yields_a_copy():
     assert "new_key" not in plan.args
 
 
+# --- async fan-out path ----------------------------------------------------
+#
+# The conftest's ``_serial_chunker`` autouse pins ``API_USGS_CONCURRENT=1``
+# for the whole suite. Each test below overrides it so the wrapper takes
+# the parallel branch. The decorator's ``fetch_async`` accepts any
+# coroutine returning ``(df, response)`` — no real ``httpx.AsyncClient``
+# round-trip occurs, even though :func:`_fan_out_async` opens one for
+# pool management.
+
+
+def _async_chunked_fetch(monkeypatch, fetch_async, *, max_concurrent=16):
+    """Decorate a deterministic chunkable fetch with the parallel
+    path forced on via ``API_USGS_CONCURRENT``."""
+    monkeypatch.setenv("API_USGS_CONCURRENT", str(max_concurrent))
+
+    @multi_value_chunked(
+        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
+    )
+    def fetch(args):
+        # Sync sibling — invoked on resume() after a parallel failure
+        # and never during the happy parallel path.
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
+
+    return fetch
+
+
+def _atom_id(args):
+    """Build a deterministic id for a sub-args dict — used as the dedup key."""
+    return ",".join(args["sites"]) if isinstance(args["sites"], list) else args["sites"]
+
+
+def _ok_response(remaining=None):
+    headers = {} if remaining is None else {_QUOTA_HEADER: str(remaining)}
+    return mock.Mock(elapsed=datetime.timedelta(seconds=0.1), headers=headers)
+
+
+def test_async_fan_out_emits_one_call_per_sub_request(monkeypatch):
+    """Parallel mode hits every sub-args once — same coverage as the
+    sync ``ChunkedCall`` path, just dispatched concurrently."""
+    seen_args = []
+
+    async def fetch_async(args):
+        seen_args.append(tuple(args["sites"]))
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
+
+    fetch = _async_chunked_fetch(monkeypatch, fetch_async)
+
+    df, _ = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+
+    # Planner halves the 4-site list, so 2 sub-args → 2 async calls.
+    assert len(seen_args) > 1
+    # Every sub-args atom is union-recovered.
+    assert sorted({s for tup in seen_args for s in tup}) == sorted(
+        ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]
+    )
+    # Frames concat to one row per sub-request id, in deterministic order.
+    assert len(df) == len(seen_args)
+
+
+def test_async_fan_out_failure_yields_resumable_call(monkeypatch):
+    """A transient 5xx mid-fan-out raises ``ServiceInterrupted`` whose
+    ``.call`` is a ``ChunkedCall`` holding the completed sub-requests
+    in a sparse index map. ``exc.call.resume()`` re-issues only the
+    unfinished sub-requests, via the sync ``fetch_once`` path."""
+    call_count = {"async": 0, "sync": 0}
+
+    async def fetch_async(args):
+        call_count["async"] += 1
+        # First sub-request succeeds; siblings fail.
+        if call_count["async"] == 1:
+            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+        raise ServiceUnavailable("503: simulated")
+
+    monkeypatch.setenv("API_USGS_CONCURRENT", "16")
+
+    @multi_value_chunked(
+        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
+    )
+    def fetch(args):
+        call_count["sync"] += 1
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+
+    with pytest.raises(ServiceInterrupted) as exc_info:
+        fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+
+    interrupted = exc_info.value
+    assert interrupted.call is not None, "parallel-mode interruption must be resumable"
+    # First sub-request completed; the rest still owe.
+    assert interrupted.completed_chunks == 1
+    assert interrupted.total_chunks > 1
+
+    # Resume on the sync path picks up only the missing sub-requests.
+    sync_before = call_count["sync"]
+    df, _ = interrupted.call.resume()
+    sync_calls_on_resume = call_count["sync"] - sync_before
+    assert sync_calls_on_resume == interrupted.total_chunks - 1
+    # Final frame unions every sub-args.
+    assert len(df) == interrupted.total_chunks
+
+
+@pytest.mark.parametrize(
+    "fallback_trigger,warning_match",
+    [
+        pytest.param("running_loop", "running asyncio event loop", id="running-loop"),
+        pytest.param("no_fetch_async", "no async fetch sibling", id="missing-async"),
+    ],
+)
+def test_async_falls_back_to_serial_with_warning(
+    monkeypatch, fallback_trigger, warning_match
+):
+    """The parallel path falls back to the serial ``ChunkedCall``
+    (with a ``UserWarning``) in two situations:
+
+    * a running asyncio event loop (Jupyter / IPython kernels, async
+      apps) — ``asyncio.run`` would otherwise raise ``RuntimeError``;
+    * the decorator wasn't wired with a ``fetch_async=`` sibling —
+      ``API_USGS_CONCURRENT`` would otherwise be a silent no-op.
+    """
+    sync_calls = []
+    monkeypatch.setenv("API_USGS_CONCURRENT", "16")
+
+    if fallback_trigger == "running_loop":
+
+        async def fetch_async(args):
+            raise AssertionError("parallel path must not run inside an active loop")
+
+        @multi_value_chunked(
+            build_request=_fake_build, fetch_async=fetch_async, url_limit=240
+        )
+        def fetch(args):
+            sync_calls.append(tuple(args["sites"]))
+            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
+
+        async def driver():
+            with pytest.warns(UserWarning, match=warning_match):
+                return fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+
+        df, _ = asyncio.run(driver())
+    else:
+
+        @multi_value_chunked(build_request=_fake_build, url_limit=240)
+        def fetch(args):
+            sync_calls.append(tuple(args["sites"]))
+            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
+
+        with pytest.warns(UserWarning, match=warning_match):
+            df, _ = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+
+    assert len(sync_calls) > 1
+    assert len(df) == len(sync_calls)
+
+
+def test_async_fan_out_cancellation_wins_over_transient_sibling(monkeypatch):
+    """``asyncio.CancelledError`` raised by any sub-request must
+    propagate unmodified, even when a sibling raises a recognized
+    transient (which would otherwise wrap as a resumable
+    :class:`ChunkInterrupted`). Cancellation is asyncio's abort
+    signal — letting a transient-classification path consume it
+    would silently swallow the user's stop request.
+
+    fetch_async has no ``await`` inside its body, so gather schedules
+    the tasks in submission order and each runs synchronously to its
+    raise — making ``call_count`` deterministic for this test:
+    1 = probe, 2 = first fan-out task (transient), 3 = second
+    fan-out task (cancellation).
+    """
+    call_count = {"async": 0}
+
+    async def fetch_async(args):
+        call_count["async"] += 1
+        if call_count["async"] == 1:
+            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+        if call_count["async"] == 2:
+            raise ServiceUnavailable("503: transient sibling")
+        if call_count["async"] == 3:
+            raise asyncio.CancelledError("user cancel")
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+
+    fetch = _async_chunked_fetch(monkeypatch, fetch_async)
+
+    # 8 × 20-byte sites force the planner to >=3 sub-args under
+    # url_limit=240, so the fan-out gather sees at least the
+    # transient (call 2) AND the cancellation (call 3).
+    sites = [f"S{i}" * 10 for i in range(1, 9)]
+
+    with pytest.raises(asyncio.CancelledError):
+        fetch({"sites": sites})
+
+
 def test_combine_chunk_responses_does_not_mutate_input_urls():
     """Regression for the _set_response_url aliasing bug.
 
@@ -1230,3 +1425,228 @@ def test_combine_chunk_responses_does_not_mutate_input_urls():
     assert str(r2.url) == "https://example.com/chunk1"
     assert str(req1.url) == "https://example.com/chunk0"
     assert str(req2.url) == "https://example.com/chunk1"
+
+
+# ---------------------------------------------------------------------------
+# Retry-with-backoff: RetryPolicy + _retryable + drivers + decorator wiring.
+# Conftest pins API_USGS_RETRIES=0, so these tests opt in explicitly and
+# patch chunking._SLEEP / chunking._ASLEEP to no-ops (no real backoff).
+# ---------------------------------------------------------------------------
+
+
+def _wrap_cause(transport_exc):
+    """Wrap ``transport_exc`` the way ``_walk_pages`` does — a
+    ``RuntimeError`` with the typed transport error on ``__cause__`` — so
+    chain-walking is exercised realistically."""
+    try:
+        raise RuntimeError("Paginated request failed") from transport_exc
+    except RuntimeError as wrapped:
+        return wrapped
+
+
+# -- RetryPolicy (pure value object) ----------------------------------------
+
+
+def test_retry_policy_backoff_honors_retry_after():
+    policy = RetryPolicy()
+    # A server Retry-After overrides the computed backoff verbatim.
+    assert policy.backoff(attempt=1, retry_after=7.5) == 7.5
+    assert policy.backoff(attempt=4, retry_after=2.0) == 2.0
+
+
+def test_retry_policy_backoff_full_jitter_within_ceiling():
+    policy = RetryPolicy(base_backoff=2.0, max_backoff=30.0)
+    for attempt, ceiling in [(1, 2.0), (2, 4.0), (3, 8.0), (5, 30.0)]:
+        samples = [policy.backoff(attempt, None) for _ in range(200)]
+        assert all(0.0 <= s <= ceiling for s in samples)
+        # Full jitter genuinely varies and reaches below the ceiling.
+        assert min(samples) < ceiling
+
+
+def test_retry_policy_should_retry_exhaustion():
+    policy = RetryPolicy(max_retries=2)
+    assert policy.should_retry(attempt=1, retry_after=None)
+    assert policy.should_retry(attempt=2, retry_after=None)
+    assert not policy.should_retry(attempt=3, retry_after=None)
+
+
+def test_retry_policy_long_retry_after_escalates():
+    policy = RetryPolicy(max_retries=5, retry_after_cap=60.0)
+    assert policy.should_retry(attempt=1, retry_after=30.0)  # absorbed inline
+    assert not policy.should_retry(attempt=1, retry_after=120.0)  # escalates
+
+
+def test_retry_policy_from_env(monkeypatch):
+    monkeypatch.setenv("API_USGS_RETRIES", "2")
+    assert RetryPolicy.from_env().max_retries == 2
+    monkeypatch.setenv("API_USGS_RETRIES", "0")
+    assert RetryPolicy.from_env().max_retries == 0
+    monkeypatch.delenv("API_USGS_RETRIES", raising=False)
+    assert RetryPolicy.from_env().max_retries == _chunking._RETRIES_DEFAULT
+    monkeypatch.setenv("API_USGS_RETRIES", "-1")
+    with pytest.raises(ValueError):
+        RetryPolicy.from_env()
+    monkeypatch.setenv("API_USGS_RETRIES", "lots")
+    with pytest.raises(ValueError):
+        RetryPolicy.from_env()
+
+
+# -- _retryable taxonomy ----------------------------------------------------
+
+
+def test_retryable_taxonomy():
+    assert _retryable(RateLimited("429", retry_after=5.0)) == (True, 5.0)
+    assert _retryable(ServiceUnavailable("503")) == (True, None)
+    assert _retryable(httpx.ReadTimeout("slow")) == (True, None)
+    assert _retryable(httpx.ConnectError("down")) == (True, None)
+    # InvalidURL is resumable but NOT retryable (a too-long cursor won't fix).
+    assert _retryable(httpx.InvalidURL("too long")) == (False, None)
+    # Plain non-transient (e.g. a 4xx programmer error wrapped as RuntimeError).
+    assert _retryable(RuntimeError("400")) == (False, None)
+
+
+def test_retryable_walks_cause_chain():
+    assert _retryable(_wrap_cause(RateLimited("429", retry_after=3.0))) == (True, 3.0)
+
+
+# -- sync driver ------------------------------------------------------------
+
+
+def test_retry_sync_transient_then_success(monkeypatch):
+    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RateLimited("429")
+        return "ok"
+
+    assert _retry_sync(fn, RetryPolicy(max_retries=3, base_backoff=0.0)) == "ok"
+    assert calls["n"] == 3  # two failures + one success
+
+
+def test_retry_sync_exhausted_reraises(monkeypatch):
+    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise ServiceUnavailable("503")
+
+    with pytest.raises(ServiceUnavailable):
+        _retry_sync(fn, RetryPolicy(max_retries=2, base_backoff=0.0))
+    assert calls["n"] == 3  # first attempt + 2 retries
+
+
+def test_retry_sync_non_retryable_not_retried(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(_chunking, "_SLEEP", slept.append)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise RuntimeError("400: bad request")
+
+    with pytest.raises(RuntimeError):
+        _retry_sync(fn, RetryPolicy(max_retries=3))
+    assert calls["n"] == 1 and slept == []
+
+
+def test_retry_sync_long_retry_after_escalates(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(_chunking, "_SLEEP", slept.append)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise RateLimited("429", retry_after=999.0)
+
+    with pytest.raises(RateLimited):
+        _retry_sync(fn, RetryPolicy(max_retries=5, retry_after_cap=60.0))
+    assert calls["n"] == 1 and slept == []  # no inline wait for a long window
+
+
+# -- async driver -----------------------------------------------------------
+
+
+def test_retry_async_transient_then_success(monkeypatch):
+    async def _noslept(_d):
+        return None
+
+    monkeypatch.setattr(_chunking, "_ASLEEP", _noslept)
+    calls = {"n": 0}
+
+    async def afn():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("slow")
+        return "ok"
+
+    out = asyncio.run(_retry_async(afn, RetryPolicy(max_retries=3, base_backoff=0.0)))
+    assert out == "ok" and calls["n"] == 2
+
+
+# -- end-to-end through the decorator --------------------------------------
+
+
+def test_chunker_retries_transient_then_completes(monkeypatch):
+    """A transient on one sub-request is retried transparently; the
+    decorated call completes with no ChunkInterrupted."""
+    monkeypatch.setenv("API_USGS_RETRIES", "3")
+    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+    state = {"failed": False}
+
+    def fetch(args):
+        # Fail the first sub-request once, then succeed everywhere.
+        if not state["failed"]:
+            state["failed"] = True
+            raise RateLimited("429: Too many requests made.")
+        return pd.DataFrame({"sites": list(args["sites"])}), _quota_response(500)
+
+    decorated = multi_value_chunked(build_request=_fake_build, url_limit=240)(fetch)
+    sites = ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]
+    df, _ = decorated({"sites": sites})
+    assert sorted(df["sites"]) == sorted(sites)  # all recovered despite the 429
+
+
+def test_chunker_exhausted_retries_still_resumable(monkeypatch):
+    """When retries are exhausted the failure still surfaces as a
+    resumable ChunkInterrupted — retries don't swallow the escape hatch."""
+    monkeypatch.setenv("API_USGS_RETRIES", "2")
+    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+    attempts = {"n": 0}
+
+    def fetch(args):
+        sites = list(args["sites"])
+        if "S1" * 10 in sites:
+            attempts["n"] += 1
+            raise ServiceUnavailable("503: service unavailable")
+        return pd.DataFrame({"sites": sites}), _quota_response(500)
+
+    decorated = multi_value_chunked(build_request=_fake_build, url_limit=240)(fetch)
+    with pytest.raises(ServiceInterrupted) as excinfo:
+        decorated({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+    assert excinfo.value.call is not None
+    assert attempts["n"] == 3  # first attempt + 2 retries before giving up
+
+
+def test_async_fan_out_retries_transient_then_completes(monkeypatch):
+    """The parallel path retries a transient sub-request and completes."""
+    monkeypatch.setenv("API_USGS_RETRIES", "3")
+
+    async def _noslept(_d):
+        return None
+
+    monkeypatch.setattr(_chunking, "_ASLEEP", _noslept)
+    state = {"failed": False}
+
+    async def fetch_async(args):
+        if not state["failed"]:
+            state["failed"] = True
+            raise ServiceUnavailable("503: transient")
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
+
+    fetch = _async_chunked_fetch(monkeypatch, fetch_async)
+    df, _ = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+    assert len(df) > 1  # every sub-args atom recovered after the retry

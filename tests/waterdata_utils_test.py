@@ -221,6 +221,37 @@ def test_walk_pages_wraps_initial_page_parse_error():
     assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
 
 
+def test_walk_pages_async_wraps_initial_page_parse_error():
+    """Async sibling of the above. ``_paginate_async`` must wrap an
+    initial-page parse failure with the same ``RuntimeError`` shape so
+    callers get a consistent diagnostic across sync and async paths."""
+    import asyncio
+
+    from dataretrieval.waterdata.utils import _walk_pages_async
+
+    resp = mock.MagicMock()
+    resp.status_code = 200
+    resp.url = "https://example.com/page1"
+    resp.json.side_effect = json.JSONDecodeError("Expecting value", "<html>...", 0)
+
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
+    mock_client.send.return_value = resp
+
+    mock_req = mock.MagicMock(spec=httpx.Request)
+    mock_req.method = "GET"
+    mock_req.headers = {}
+    mock_req.content = b""
+    mock_req.url = "https://example.com/page1"
+
+    async def run():
+        await _walk_pages_async(geopd=False, req=mock_req, client=mock_client)
+
+    with pytest.raises(RuntimeError, match="Paginated request failed") as excinfo:
+        asyncio.run(run())
+
+    assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
+
+
 def test_get_resp_data_handles_missing_features_key():
     """Regression: a 200 with ``numberReturned > 0`` but no
     ``features`` key (real schema-drift shape) used to crash
