@@ -61,7 +61,7 @@ Using ``dataretrieval`` to obtain nation trends in peak annual streamflow
 .. toctree::
     :maxdepth: 2
 
-    nwisdemo01
+    peak_streamflow_trends
 
 
 Duplicating the R ``dataRetrieval`` vignettes functionality
