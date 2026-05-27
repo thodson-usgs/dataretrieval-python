@@ -13,7 +13,7 @@ Concurrency: ``multi_value_chunked`` fans every pending sub-request out
 under one ``asyncio.gather`` sharing a single ``httpx.AsyncClient``;
 concurrency is bounded purely by the client's connection pool
 (``httpx.Limits(max_connections=N, max_keepalive_connections=N)``), so
-the pool — not a semaphore — throttles. ``API_USGS_CONCURRENT`` resolves
+the pool throttles. ``API_USGS_CONCURRENT`` resolves
 ``N``: an integer N > 1 caps connections at N; ``1`` pins a single
 connection (one request at a time); the literal ``unbounded`` removes
 the cap (``N=None``). The default (16) is the server-friendly sweet
@@ -153,13 +153,10 @@ def _read_concurrency_env() -> int | None:
 
 
 # Retry-with-backoff defaults for transient sub-request failures (429 /
-# 5xx / connect-read timeouts). All four are resolved at call time by
-# ``RetryPolicy.from_env`` (the env var via ``monkeypatch.setenv``, the
-# timing constants via ``monkeypatch.setattr`` on this module), so both
-# are overridable in tests and by power users. Defaults: 4 retries, 0.5s
-# base doubling under full jitter up to a 30s per-attempt ceiling, and
-# honor a server ``Retry-After`` up to 60s before escalating to a
-# resumable interruption instead.
+# 5xx / connect-read timeouts): 4 retries, 0.5s base doubling under full
+# jitter up to a 30s per-attempt ceiling, and honor a server
+# ``Retry-After`` up to 60s before escalating to a resumable interruption
+# instead.
 _RETRIES_ENV = "API_USGS_RETRIES"
 _RETRIES_DEFAULT = 4
 _RETRY_BASE_BACKOFF = 0.5
@@ -196,7 +193,7 @@ class RetryPolicy:
     """Bounded retry-with-backoff config for transient sub-request failures.
 
     An immutable value object that owns the *timing* decisions; the
-    exception taxonomy ("is this worth retrying at all?") lives in
+    exception taxonomy (which failures are retryable) lives in
     :func:`_retryable`. Backoff is exponential with **full jitter**
     (:func:`random.uniform` over ``[0, ceiling]``) so the concurrent
     fan-out's retries don't re-burst in lockstep. A server ``Retry-After``
@@ -376,14 +373,12 @@ _OR_SEP = " OR "
 # ``ChunkedCall`` drives: an ``async def fetch(args) -> (df, response)``.
 _Fetch = Callable[[dict[str, Any]], Awaitable[tuple[pd.DataFrame, httpx.Response]]]
 
-# Caller-supplied transform applied to the *combined* chunk result. It lets a
-# resumed call (:meth:`ChunkedCall.resume` / :attr:`~ChunkedCall.partial_frame`
-# / :attr:`~ChunkedCall.partial_response`) return the same shape as the
-# un-interrupted call instead of the chunker's raw ``(frame, httpx.Response)``.
-# The chunker stays generic — it only knows "post-process the assembled
-# result"; the OGC getters inject the actual type-coercion / column-arrangement
-# / ``BaseMetadata`` pipeline (see ``utils._finalize_ogc``). The default is
-# identity, so direct ``ChunkedCall`` use and the tests are unaffected.
+# Caller-supplied transform applied to the combined chunk result, so a
+# resumed call returns the same shape as an un-interrupted one rather than
+# the chunker's raw ``(frame, httpx.Response)``. This keeps the chunker
+# generic: the OGC getters inject their post-processing (type coercion,
+# column arrangement, ``BaseMetadata``) through ``utils._finalize_ogc``.
+# The default is identity, so direct ``ChunkedCall`` use is unaffected.
 _Finalize = Callable[[pd.DataFrame, httpx.Response], tuple[pd.DataFrame, Any]]
 
 
@@ -1114,18 +1109,16 @@ def _retryable(exc: BaseException) -> tuple[bool, float | None]:
     """
     Decide whether ``exc`` is a transient worth an automatic retry.
 
-    Inspects only the *top-level* exception, by design — and so is
-    deliberately narrower than :func:`_classify_chunk_error`, which walks
-    the ``__cause__`` chain for resumability. ``_paginate`` raises an
-    initial-request transient (429 / 5xx / :class:`httpx.TransportError`
-    such as ``ConnectError`` / ``ReadTimeout``) *raw*, but re-wraps any
-    mid-pagination failure as a ``RuntimeError``. Retrying only the raw,
-    top-level transient means we re-issue a sub-request that made no
-    progress (cheap), while a failure after partial pagination escalates
-    to the resumable :class:`ChunkInterrupted` instead of being re-walked
-    from page 1 — which would re-spend the very quota that was exhausted.
-    ``httpx.InvalidURL`` is excluded (a too-long cursor won't fix on
-    retry), and it only ever arises on a follow-up page anyway.
+    Only the *top-level* exception is inspected — unlike
+    :func:`_classify_chunk_error`, which walks the ``__cause__`` chain.
+    The distinction matters because ``_paginate`` raises an
+    initial-request transient (429 / 5xx / :class:`httpx.TransportError`)
+    *raw*, but wraps a mid-pagination failure as a ``RuntimeError``. So a
+    raw transient means a sub-request that made no progress and is cheap to
+    re-issue, whereas a mid-pagination failure is left to escalate to a
+    resumable :class:`ChunkInterrupted` rather than re-walked from page 1
+    (which would re-spend the quota just exhausted). ``httpx.InvalidURL``
+    is never retried — a too-long cursor won't fix on a retry.
 
     Returns
     -------
@@ -1620,9 +1613,8 @@ class ChunkedCall:
 
     async def _run(self, max_concurrent: int | None) -> tuple[pd.DataFrame, Any]:
         """
-        The async execution core: gather every pending sub-request over
-        one shared :class:`httpx.AsyncClient` and return the combined,
-        finalized result.
+        Gather every pending sub-request over one shared
+        :class:`httpx.AsyncClient` and return the combined, finalized result.
 
         Pending sub-requests (:meth:`_pending`) fan out under
         ``asyncio.gather`` with ``return_exceptions=True`` so completed
@@ -1632,12 +1624,12 @@ class ChunkedCall:
         ``.call``; ``exc.call.resume()`` then re-issues only the unfinished
         indices through this same runner.
 
-        Concurrency is bounded purely by the client's connection pool —
+        Concurrency is bounded by the client's connection pool —
         ``httpx.Limits(max_connections=N, max_keepalive_connections=N)``
-        where ``N = max_concurrent`` (``None`` for unbounded). There is no
-        semaphore: the gather dispatches *every* pending sub-request and the
-        pool throttles, so ``N=1`` is just a single-connection gather (one
-        request at a time) and ``total <= 1`` is just a one-element gather.
+        where ``N = max_concurrent`` (``None`` for unbounded). The gather
+        dispatches *every* pending sub-request and the pool throttles, so
+        ``N=1`` is just a single-connection gather (one request at a time)
+        and ``total <= 1`` is just a one-element gather.
         The shared client is published on :data:`_chunked_client` so
         the paginated-loop helpers reuse its connection pool.
 
