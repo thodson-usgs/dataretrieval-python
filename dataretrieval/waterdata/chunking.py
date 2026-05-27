@@ -4,9 +4,9 @@ A Water Data query has several chunkable axes: every multi-value list
 parameter (sites, parameter codes, …) plus the cql-text ``filter``,
 which splits along its top-level OR clauses. Any of them can fan the
 URL past the server's ~8 KB byte limit. ``ChunkPlan`` picks a fan-out
-for each axis that minimizes total sub-requests under the URL budget;
-``ChunkedCall`` iterates the joint cartesian product so every
-sub-request URL fits. Requests that already fit get a trivial
+for each axis that minimizes total sub-requests while keeping every
+sub-request URL under the budget; ``ChunkedCall`` fetches the resulting
+cartesian product of chunks. Requests that already fit get a trivial
 single-step plan — ``ChunkedCall`` has one code path either way.
 
 Concurrency: ``multi_value_chunked`` fans every pending sub-request out
@@ -1412,10 +1412,8 @@ class ChunkedCall:
         self.fetch = fetch
         self.retry_policy = retry_policy
         self.finalize = finalize
-        # Completed (frame, response) pairs keyed by sub-args index.
-        # Sparse so the gather can record scattered completions (e.g.
-        # indices [0, 2, 5] when 1/3/4 failed) and a subsequent
-        # ``resume()`` only re-issues the missing indices.
+        # Completed (frame, response) pairs keyed by sub-args index; sparse
+        # (gathered sub-requests complete out of order — see class docstring).
         self._chunks: dict[int, tuple[pd.DataFrame, httpx.Response]] = {}
 
     def record(self, index: int, pair: tuple[pd.DataFrame, httpx.Response]) -> None:
@@ -1669,8 +1667,7 @@ class ChunkedCall:
         # ``httpx.Limits()`` defaults to ``max_connections=100`` — at higher
         # concurrency the pool would silently bottleneck the fan-out behind
         # that cap. Set it to the resolved concurrency so the pool *is* the
-        # throttle (``None`` for truly unbounded). No semaphore: we gather
-        # every pending sub-request and let the pool serialize.
+        # throttle (``None`` for truly unbounded).
         limits = httpx.Limits(
             max_connections=max_concurrent, max_keepalive_connections=max_concurrent
         )
