@@ -9,18 +9,20 @@ for each axis that minimizes total sub-requests under the URL budget;
 sub-request URL fits. Requests that already fit get a trivial
 single-step plan — ``ChunkedCall`` has one code path either way.
 
-Concurrency: when ``API_USGS_CONCURRENT`` is set to an integer N > 1
-(or the literal ``unbounded``), ``multi_value_chunked`` fans the plan
-out across ``N`` async coroutines sharing one ``httpx.AsyncClient``
-instead of issuing sub-requests serially. ``N=1`` forces the
-synchronous path. The default (16) is the server-friendly sweet
-spot; higher values can trip USGS burst-protection 5xx in practice.
-The fan-out runs in a short-lived worker thread (an
-``anyio`` blocking portal), so it works whether or not the caller is
-already inside an event loop (Jupyter / IPython / async apps) — no
-nested-loop error and no silent serial degradation. It falls back to
-the serial path (with a ``UserWarning``) only when no async fetch
-sibling is wired into the decorator.
+Concurrency: the execution core is async-only. ``multi_value_chunked``
+fans every pending sub-request out under one ``asyncio.gather`` sharing
+a single ``httpx.AsyncClient``; concurrency is bounded purely by the
+client's connection pool (``httpx.Limits(max_connections=N,
+max_keepalive_connections=N)``), so the pool — not a semaphore —
+throttles. ``API_USGS_CONCURRENT`` resolves ``N``: an integer N > 1
+caps connections at N; ``1`` pins a single connection (effectively
+serial); the literal ``unbounded`` removes the cap (``N=None``). The
+default (16) is the server-friendly sweet spot; higher values can trip
+USGS burst-protection 5xx in practice. The fan-out runs in a
+short-lived worker thread (an ``anyio`` blocking portal), so the
+synchronous public API drives it whether or not the caller is already
+inside an event loop (Jupyter / IPython / async apps) — no nested-loop
+error and no silent serial degradation.
 
 Retries: each sub-request is retried on a transient failure (429,
 5xx, connect/read timeout) with exponential backoff + full jitter,
@@ -34,11 +36,11 @@ Interruption: any mid-stream transient failure (429, 5xx) surfaces
 as a ``ChunkInterrupted`` subclass — ``QuotaExhausted`` for 429,
 ``ServiceInterrupted`` for 5xx. The exception carries ``.call``, a
 ``ChunkedCall`` handle that owns the already-completed sub-request
-state (sparse-indexed on the parallel path, contiguous-prefix on
-the serial path). Call ``.call.resume()`` once the underlying
-condition clears; only the still-pending sub-requests are
-re-issued, via the serial sync path. ``Retry-After`` (when the
-server sets it) is surfaced on the exception as ``.retry_after``.
+state (sparse-indexed, since gathered sub-requests complete out of
+order). Call ``.call.resume()`` once the underlying condition clears;
+only the still-pending sub-requests are re-issued (``resume()`` is a
+synchronous facade over the same async runner). ``Retry-After`` (when
+the server sets it) is surfaced on the exception as ``.retry_after``.
 
 Dedup: list-axis chunks don't overlap; filter-axis chunks can, so
 ``_combine_chunk_frames`` dedupes by feature ``id``. ``properties``,
@@ -56,15 +58,12 @@ import itertools
 import math
 import os
 import random
-import sys
-import time
-import warnings
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar
 from urllib.parse import quote_plus
 
 import httpx
@@ -328,89 +327,57 @@ class RetryPolicy:
 _NO_RETRY = RetryPolicy(max_retries=0)
 
 
-# Client shared across all sub-requests of a single chunked call so
-# paginated-loop helpers downstream (``_walk_pages``) reuse one
-# connection pool across the whole fan-out. ``None`` when not inside a
-# chunked call — paginated helpers fall back to their own short-lived
-# client in that case.
-_chunked_client: ContextVar[httpx.Client | None] = ContextVar(
-    "_chunked_client", default=None
-)
-
-# Async sibling of ``_chunked_client``. Published (via :func:`_publish`)
-# during ``ChunkedCall.resume_async`` so async paginated-loop helpers reuse one
-# ``httpx.AsyncClient`` (and its connection pool) across every concurrent
-# sub-request of a single chunked call.
+# The single shared ``httpx.AsyncClient`` of an in-flight chunked call,
+# published (via :func:`_publish`) during ``ChunkedCall._run`` so async
+# paginated-loop helpers downstream (``_walk_pages_async``) reuse one
+# connection pool across every gathered sub-request of the call. ``None``
+# when not inside a chunked call — paginated helpers fall back to their
+# own short-lived client in that case.
 _chunked_async_client: ContextVar[httpx.AsyncClient | None] = ContextVar(
     "_chunked_async_client", default=None
 )
 
-_ClientT = TypeVar("_ClientT")
-
 
 @contextmanager
-def _publish(var: ContextVar[_ClientT | None], client: _ClientT) -> Iterator[None]:
+def _publish(client: httpx.AsyncClient) -> Iterator[None]:
     """
-    Bind ``client`` to the ContextVar ``var`` for the duration of the
-    ``with`` block (wrapping the set/reset token dance), so paginated-loop
-    helpers can borrow the chunker's shared client via
-    :func:`get_active_client` / :func:`get_active_async_client`.
-
-    Generic over the client type so the sync (:class:`httpx.Client` via
-    ``_chunked_client``) and async (:class:`httpx.AsyncClient` via
-    ``_chunked_async_client``) paths share one implementation, while the
-    ``_ClientT`` type var still lets a type checker reject a var/client
-    type mismatch.
+    Bind ``client`` to the ``_chunked_async_client`` ContextVar for the
+    duration of the ``with`` block (wrapping the set/reset token dance),
+    so async paginated-loop helpers can borrow the chunker's shared
+    client via :func:`get_active_async_client`.
 
     Parameters
     ----------
-    var : ContextVar
-        The ContextVar to bind ``client`` to for the duration of the
-        ``with`` block.
-    client
-        The client to publish on ``var``.
+    client : httpx.AsyncClient
+        The client to publish on ``_chunked_async_client``.
 
     Yields
     ------
     None
         Yields once, for the duration of the bind.
     """
-    token = var.set(client)
+    token = _chunked_async_client.set(client)
     try:
         yield
     finally:
-        var.reset(token)
-
-
-def get_active_client() -> httpx.Client | None:
-    """
-    Return the chunker's currently-published sync client, or ``None``.
-
-    Public accessor for the ``_chunked_client`` ContextVar so
-    sibling modules (notably :func:`dataretrieval.waterdata.utils._client_for`)
-    don't have to reach into the private ContextVar directly.
-
-    Returns
-    -------
-    httpx.Client or None
-        The client published via :func:`_publish` if currently inside a
-        :class:`ChunkedCall` ``resume`` block; ``None`` otherwise.
-    """
-    return _chunked_client.get()
+        _chunked_async_client.reset(token)
 
 
 def get_active_async_client() -> httpx.AsyncClient | None:
     """
     Return the chunker's currently-published async client, or ``None``.
 
-    Async sibling of :func:`get_active_client`. Used by async
+    Public accessor for the ``_chunked_async_client`` ContextVar so
+    sibling modules (notably
+    :func:`dataretrieval.waterdata.utils._client_for_async`) don't have
+    to reach into the private ContextVar directly. Used by async
     paginated-loop helpers to reuse the per-call AsyncClient pool.
 
     Returns
     -------
     httpx.AsyncClient or None
         The client published via :func:`_publish` if currently inside a
-        :class:`ChunkedCall` ``resume_async`` block; ``None`` otherwise.
+        :class:`ChunkedCall` run; ``None`` otherwise.
     """
     return _chunked_async_client.get()
 
@@ -421,10 +388,10 @@ def get_active_async_client() -> httpx.AsyncClient | None:
 _LIST_SEP = ","
 _OR_SEP = " OR "
 
-_FetchOnce = Callable[[dict[str, Any]], tuple[pd.DataFrame, httpx.Response]]
-_FetchOnceAsync = Callable[
-    [dict[str, Any]], Awaitable[tuple[pd.DataFrame, httpx.Response]]
-]
+# The chunker's execution core is async-only: the decorated fetcher, the
+# ``ChunkedCall`` it drives, and the per-sub-request runner are all
+# coroutines. ``_Fetch`` is an ``async def fetch(args) -> (df, response)``.
+_Fetch = Callable[[dict[str, Any]], Awaitable[tuple[pd.DataFrame, httpx.Response]]]
 
 # Caller-supplied transform applied to the *combined* chunk result. It lets a
 # resumed call (:meth:`ChunkedCall.resume` / :attr:`~ChunkedCall.partial_frame`
@@ -938,7 +905,7 @@ class ChunkPlan:
         axes = _extract_axes(args)
         # No chunkable axes → skip ``build_request`` entirely; the
         # common Water Data call shape shouldn't pay for an unused
-        # request prep on the passthrough hot path. ``fetch_once``
+        # request prep on the passthrough hot path. The fetcher
         # will run with the user's args verbatim; if that produces
         # an over-budget URL, the server (or httpx itself) rejects.
         if not axes:
@@ -1071,20 +1038,20 @@ class ChunkPlan:
 
     def execute(
         self,
-        fetch_once: _FetchOnce,
+        fetch: _Fetch,
         retry_policy: RetryPolicy = _NO_RETRY,
         finalize: _Finalize = _passthrough_result,
     ) -> tuple[pd.DataFrame, Any]:
         """
         Run the plan and return the combined, finalized result.
 
-        Thin wrapper around ``ChunkedCall(self, fetch_once).resume()``;
+        Thin wrapper around ``ChunkedCall(self, fetch).resume()``;
         see :class:`ChunkedCall` for the per-sub-request semantics.
 
         Parameters
         ----------
-        fetch_once : Callable
-            Function that issues a single sub-request, given the
+        fetch : Callable
+            ``async def`` that issues a single sub-request, given the
             substituted args dict, and returns ``(frame, response)``.
         retry_policy : RetryPolicy, optional
             Per-sub-request retry-with-backoff policy. Defaults to
@@ -1109,7 +1076,7 @@ class ChunkPlan:
             :class:`ServiceInterrupted` for 5xx). The resumable handle
             is on ``exc.call``.
         """
-        return ChunkedCall(self, fetch_once, retry_policy, finalize).resume()
+        return ChunkedCall(self, fetch, retry_policy, finalize).resume()
 
 
 def _classify_chunk_error(
@@ -1169,7 +1136,7 @@ def _retryable(exc: BaseException) -> tuple[bool, float | None]:
 
     Inspects only the *top-level* exception, by design — and so is
     deliberately narrower than :func:`_classify_chunk_error`, which walks
-    the ``__cause__`` chain for resumability. ``_paginate`` raises an
+    the ``__cause__`` chain for resumability. ``_paginate_async`` raises an
     initial-request transient (429 / 5xx / :class:`httpx.TransportError`
     such as ``ConnectError`` / ``ReadTimeout``) *raw*, but re-wraps any
     mid-pagination failure as a ``RuntimeError``. Retrying only the raw,
@@ -1193,10 +1160,9 @@ def _retryable(exc: BaseException) -> tuple[bool, float | None]:
     return False, None
 
 
-# Sleep hooks, indirected through module globals so tests can
-# ``monkeypatch.setattr`` them to no-ops instead of waiting for real
-# backoff. Production uses the stdlib calls.
-_SLEEP = time.sleep
+# Sleep hook, indirected through a module global so tests can
+# ``monkeypatch.setattr`` it to a no-op instead of waiting for real
+# backoff. Production uses the stdlib call.
 _ASLEEP = asyncio.sleep
 
 
@@ -1238,48 +1204,18 @@ def _retry_delay(exc: BaseException, attempt: int, policy: RetryPolicy) -> float
     return delay
 
 
-def _retry_sync(
-    fn: Callable[[], tuple[pd.DataFrame, httpx.Response]],
-    policy: RetryPolicy,
-) -> tuple[pd.DataFrame, httpx.Response]:
-    """
-    Call ``fn`` with bounded retry-with-backoff on transient failures.
-
-    A non-retryable or policy-exhausted failure (see :func:`_retry_delay`)
-    propagates unchanged so the caller's existing handling wraps it as a
-    resumable :class:`ChunkInterrupted`.
-
-    Parameters
-    ----------
-    fn : Callable
-        Zero-arg callable that issues a single sub-request and returns
-        ``(frame, response)``.
-    policy : RetryPolicy
-        The retry-with-backoff policy governing the retries.
-
-    Returns
-    -------
-    tuple of (pandas.DataFrame, httpx.Response)
-        The ``(frame, response)`` pair from the first successful call.
-    """
-    attempt = 0
-    while True:
-        try:
-            return fn()
-        except Exception as exc:  # noqa: BLE001 — re-raised unless retryable
-            attempt += 1
-            delay = _retry_delay(exc, attempt, policy)
-            if delay is None:
-                raise
-            _SLEEP(delay)
-
-
 async def _retry_async(
     afn: Callable[[], Awaitable[tuple[pd.DataFrame, httpx.Response]]],
     policy: RetryPolicy,
 ) -> tuple[pd.DataFrame, httpx.Response]:
     """
-    Async sibling of :func:`_retry_sync` (awaits :func:`asyncio.sleep`).
+    Call ``afn`` with bounded retry-with-backoff on transient failures.
+
+    A non-retryable or policy-exhausted failure (see :func:`_retry_delay`)
+    propagates unchanged so the caller's existing handling wraps it as a
+    resumable :class:`ChunkInterrupted`. The whole retry *decision* lives
+    in :func:`_retry_delay`; this driver only awaits the sleep between
+    attempts.
 
     Parameters
     ----------
@@ -1390,7 +1326,7 @@ def _combine_chunk_responses(
         One response per completed sub-request, in execution order.
     canonical_url : str or None
         URL of the unchunked original request. ``None`` skips the URL
-        override — used by the passthrough path (``fetch_once``'s
+        override — used by the passthrough path (the fetcher's
         response already carries the original-query URL) and by the
         worst-case overflow path (no buildable canonical URL exists).
 
@@ -1433,43 +1369,51 @@ class ChunkedCall:
     Stateful handle for a chunked call.
 
     Holds the in-flight state (per-sub-request frames and responses)
-    and exposes a single :meth:`resume` entry point that drives the
-    call from wherever it is to completion — used both for the first
-    invocation (from :meth:`ChunkPlan.execute`) and for subsequent
-    retries after a :class:`ChunkInterrupted`.
+    and the async fetcher, and exposes a single :meth:`resume` entry
+    point that drives the call from wherever it is to completion — used
+    both for the first invocation (from :meth:`ChunkPlan.execute`) and
+    for subsequent retries after a :class:`ChunkInterrupted`.
+
+    The execution core is the async :meth:`_run` (gather every pending
+    sub-request over one shared :class:`httpx.AsyncClient`, apply the
+    failure-precedence rules, combine); :meth:`resume` is a thin
+    synchronous facade that drives :meth:`_run` through an ``anyio``
+    blocking portal so it works whether or not the caller is already
+    inside an event loop. There is no separate serial path: concurrency
+    is bounded purely by the client's connection pool, so a single
+    connection (``API_USGS_CONCURRENT=1``) is just a degenerate gather.
 
     A ``ChunkedCall`` is created internally when a :class:`ChunkPlan`
     executes; callers reach it via :attr:`ChunkInterrupted.call` on
     the exception raised by a mid-stream failure.
 
-    :meth:`resume` is idempotent: it iterates
+    :meth:`resume` is idempotent: :meth:`_run` iterates
     :meth:`ChunkPlan.iter_sub_args` (deterministic order) and skips
     any index whose result is already in ``self._chunks``. The
     completion set is a sparse ``dict[int, (df, response)]`` so the
-    parallel path can record scattered completions (e.g. indices
-    [0, 2, 5] after siblings [1, 3, 4] failed) and a subsequent
-    ``resume`` only re-issues the missing indices — via the serial
-    sync ``fetch_once`` path.
+    gather can record scattered completions (e.g. indices [0, 2, 5]
+    after siblings [1, 3, 4] failed) and a subsequent ``resume`` only
+    re-issues the missing indices.
 
     Parameters
     ----------
     plan : ChunkPlan
         The chunking plan to execute.
-    fetch_once : Callable
-        Function that issues a single sub-request, given the
+    fetch : Callable
+        ``async def`` that issues a single sub-request, given the
         substituted args dict, and returns ``(frame, response)``.
 
     Attributes
     ----------
     plan : ChunkPlan
         The plan being driven (read-only after construction).
-    fetch_once : Callable
-        The per-sub-request fetch function.
+    fetch : Callable
+        The async per-sub-request fetch function.
     finalize : Callable
         Transform applied to the combined result (see :data:`_Finalize`) at
-        the terminal :meth:`resume` / :meth:`resume_async` returns, so a
-        completed call yields the caller's finished shape. The ``partial_*``
-        accessors deliberately skip it and stay raw.
+        the terminal :meth:`_run` return, so a completed call yields the
+        caller's finished shape. The ``partial_*`` accessors deliberately
+        skip it and stay raw.
     partial_frame : pandas.DataFrame
         Raw combined frame of completed sub-requests (live; recomputed per
         access). Not finalized — call :meth:`resume` for the finished shape.
@@ -1481,19 +1425,18 @@ class ChunkedCall:
     def __init__(
         self,
         plan: ChunkPlan,
-        fetch_once: _FetchOnce,
+        fetch: _Fetch,
         retry_policy: RetryPolicy = _NO_RETRY,
         finalize: _Finalize = _passthrough_result,
     ) -> None:
         self.plan = plan
-        self.fetch_once = fetch_once
+        self.fetch = fetch
         self.retry_policy = retry_policy
         self.finalize = finalize
         # Completed (frame, response) pairs keyed by sub-args index.
-        # Sparse so the parallel fan-out path can record scattered
-        # completions (e.g. indices [0, 2, 5] when 1/3/4 failed) and a
-        # subsequent ``resume()`` only re-issues the missing indices.
-        # On the serial path this fills contiguously from 0.
+        # Sparse so the gather can record scattered completions (e.g.
+        # indices [0, 2, 5] when 1/3/4 failed) and a subsequent
+        # ``resume()`` only re-issues the missing indices.
         self._chunks: dict[int, tuple[pd.DataFrame, httpx.Response]] = {}
 
     def record(self, index: int, pair: tuple[pd.DataFrame, httpx.Response]) -> None:
@@ -1501,10 +1444,9 @@ class ChunkedCall:
         Record a completed sub-request's ``(frame, response)`` pair under
         its sub-args index.
 
-        The single writer of ``self._chunks`` — used by both the serial
-        loop in :meth:`resume` and the parallel fan-out in
-        :meth:`resume_async` — so ``dict`` insertion order is completion
-        order (see :meth:`_responses_by_completion`).
+        The single writer of ``self._chunks`` — used by the gather in
+        :meth:`_run` — so ``dict`` insertion order is completion order
+        (see :meth:`_combine_raw`).
 
         Parameters
         ----------
@@ -1588,9 +1530,8 @@ class ChunkedCall:
         """
         Combine every recorded sub-request and apply :attr:`finalize`.
 
-        The terminal *success* result: :meth:`resume` and
-        :meth:`resume_async` both return this, so a completed call (whether
-        serial or parallel, first run or resume) yields the same shape
+        The terminal *success* result: :meth:`_run` returns this, so a
+        completed call (first run or resume) yields the same shape
         ``finalize`` produces — a raw ``(frame, httpx.Response)`` by
         default, or the OGC getters' type-coerced / column-arranged frame
         plus ``BaseMetadata``. The ``partial_*`` accessors deliberately do
@@ -1655,9 +1596,8 @@ class ChunkedCall:
 
         The single source of the "walk :meth:`ChunkPlan.iter_sub_args` in
         deterministic order, skip any index already in ``self._chunks``"
-        rule, shared by the serial :meth:`resume` and the parallel
-        :meth:`resume_async` so the two execution paths can't drift on
-        *which* sub-requests they still owe.
+        rule that :meth:`_run` uses to decide *which* sub-requests it
+        still owes (first run and every resume alike).
 
         Yields
         ------
@@ -1671,21 +1611,19 @@ class ChunkedCall:
 
     def resume(self) -> tuple[pd.DataFrame, Any]:
         """
-        Drive the chunked call to completion via the sync ``fetch_once``.
+        Drive the chunked call to completion. Synchronous facade.
 
-        Opens one ``httpx.Client`` for the run and publishes it on
-        the ``_chunked_client`` ``ContextVar`` so paginated-loop
-        helpers downstream (``_walk_pages``) reuse the same connection
-        pool across every sub-request instead of handshaking fresh on
-        each. The client is closed when ``resume`` returns or raises;
-        a follow-up ``resume`` call (after a ``ChunkInterrupted``)
-        opens a new one.
+        Runs the async core :meth:`_run` through an ``anyio`` blocking
+        portal (a short-lived worker thread), so the synchronous public
+        API works whether or not the caller is already inside an event
+        loop (Jupyter / IPython / async apps) — no nested-``asyncio.run``
+        error. The portal copies the calling context, so the active
+        progress reporter still reaches the fan-out.
 
         Idempotent: only sub-requests whose index isn't already in
         ``self._chunks`` are re-issued. Sub-args order matches
         :meth:`ChunkPlan.iter_sub_args` and is deterministic, so a
-        parallel-mode partial completion (sparse indices) resumes
-        correctly via the sync path.
+        partial completion (sparse indices) resumes correctly.
 
         Returns
         -------
@@ -1693,9 +1631,10 @@ class ChunkedCall:
             Combined data from every successful sub-request.
         response
             The finalized aggregate — a raw :class:`httpx.Response`
-            (canonical URL, last page's headers, cumulative elapsed time)
-            by default, or whatever :attr:`finalize` produces (e.g.
-            ``BaseMetadata`` for the OGC getters).
+            (canonical URL, most-recently-completed sub-request's headers,
+            cumulative elapsed time) by default, or whatever
+            :attr:`finalize` produces (e.g. ``BaseMetadata`` for the OGC
+            getters).
 
         Raises
         ------
@@ -1706,62 +1645,15 @@ class ChunkedCall:
             is on ``exc.call`` — wait for the underlying condition to
             clear and call ``exc.call.resume()`` again.
         """
-        with httpx.Client(**HTTPX_DEFAULTS) as client:
-            with _publish(_chunked_client, client):
-                reporter = _progress.current()
-                if reporter is not None:
-                    reporter.set_chunks(self.plan.total)
-                for index, sub_args in self._pending():
-                    # Serial progress semantics: announce the chunk we're
-                    # *about to* fetch (1-based), so the line reads
-                    # "chunk k/total" while that fetch + its pages are in
-                    # flight. (The parallel path can't do this — chunks fire
-                    # at once and finish out of order — so :meth:`resume_async`
-                    # instead ticks the completed *count*; the two are
-                    # deliberately different, not drift.)
-                    if reporter is not None:
-                        reporter.start_chunk(index + 1)
-                    self._issue(index, sub_args)
-                return self.combined()
+        concurrency = _read_concurrency_env()
+        with start_blocking_portal() as portal:
+            return portal.call(functools.partial(self._run, concurrency))
 
-    def _issue(self, index: int, sub_args: dict[str, Any]) -> None:
+    async def _run(self, max_concurrent: int | None) -> tuple[pd.DataFrame, Any]:
         """
-        Issue one sub-request and record its ``(frame, response)`` pair
-        under ``index``.
-
-        On failure, classify the exception and either wrap it as a
-        resumable :class:`ChunkInterrupted` carrying this call, or
-        re-raise it unchanged to preserve its type. Catches
-        ``RuntimeError`` (the layer's typed contract:
-        :class:`RateLimited`, :class:`ServiceUnavailable`, or the
-        mid-pagination wrapper), :class:`httpx.HTTPError`
-        (transport-level failures like ``ConnectError`` /
-        ``TimeoutException``), and :class:`httpx.InvalidURL` (which
-        inherits directly from ``Exception``, not ``HTTPError``); all
-        three feed :func:`_classify_chunk_error`.
-
-        Parameters
-        ----------
-        index : int
-            The sub-args index this sub-request belongs to.
-        sub_args : dict
-            The substituted args dict for this sub-request.
-        """
-        try:
-            chunk = _retry_sync(lambda: self.fetch_once(sub_args), self.retry_policy)
-        except (RuntimeError, httpx.HTTPError, httpx.InvalidURL) as exc:
-            interrupted = self.wrap_failure(exc)
-            if interrupted is None:
-                raise
-            raise interrupted from exc
-        self.record(index, chunk)
-
-    async def resume_async(
-        self, fetch_async: _FetchOnceAsync, *, max_concurrent: int | None
-    ) -> tuple[pd.DataFrame, Any]:
-        """
-        Drive the chunked call to completion concurrently over one shared
-        :class:`httpx.AsyncClient`. Async sibling of :meth:`resume`.
+        The async execution core: gather every pending sub-request over
+        one shared :class:`httpx.AsyncClient` and return the combined,
+        finalized result.
 
         Pending sub-requests (:meth:`_pending`) fan out under
         ``asyncio.gather`` with ``return_exceptions=True`` so completed
@@ -1769,23 +1661,22 @@ class ChunkedCall:
         transient (:class:`RateLimited`, :class:`ServiceUnavailable`) a
         :class:`ChunkInterrupted` subclass is raised carrying ``self`` on
         ``.call``; ``exc.call.resume()`` then re-issues only the unfinished
-        indices via the serial sync ``fetch_once`` path. The per-sub-request
-        bookkeeping (:meth:`_pending`, :meth:`record`, :meth:`wrap_failure`,
-        :meth:`combined`) is shared with :meth:`resume`, so the two execution
-        paths differ only in serial ``for`` vs concurrent ``gather``.
+        indices through this same runner.
 
-        In-flight sub-requests are capped by an :class:`asyncio.Semaphore`;
-        ``max_concurrent=None`` ("unbounded") uses ``sys.maxsize`` so every
-        call site takes the same ``async with semaphore`` path. The shared
-        client is published on :data:`_chunked_async_client` so async
-        paginated-loop helpers reuse its connection pool.
+        Concurrency is bounded purely by the client's connection pool —
+        ``httpx.Limits(max_connections=N, max_keepalive_connections=N)``
+        where ``N = max_concurrent`` (``None`` for unbounded). There is no
+        semaphore: the gather dispatches *every* pending sub-request and the
+        pool throttles, so ``N=1`` is just a single-connection gather
+        (effectively serial) and ``total <= 1`` is just a one-element gather.
+        The shared client is published on :data:`_chunked_async_client` so
+        async paginated-loop helpers reuse its connection pool.
 
         Parameters
         ----------
-        fetch_async : Callable
-            Async per-sub-request fetcher returning ``(df, response)``.
         max_concurrent : int or None
-            Maximum in-flight sub-requests. ``None`` disables the cap.
+            Maximum simultaneous connections (the pool cap). ``None``
+            disables the cap.
 
         Returns
         -------
@@ -1802,25 +1693,19 @@ class ChunkedCall:
         ChunkInterrupted
             On a transient sub-request failure. ``.call`` is ``self``,
             holding the sparse completed sub-requests; ``.call.resume()``
-            re-issues the unfinished ones serially.
+            re-issues the unfinished ones.
         """
-        # ``httpx.Limits()`` defaults to ``max_connections=100`` — at
-        # higher concurrency the pool would silently bottleneck the
-        # fan-out behind the connection cap. Match it to the semaphore,
-        # or ``None`` for truly unbounded.
+        # ``httpx.Limits()`` defaults to ``max_connections=100`` — at higher
+        # concurrency the pool would silently bottleneck the fan-out behind
+        # that cap. Set it to the resolved concurrency so the pool *is* the
+        # throttle (``None`` for truly unbounded). No semaphore: we gather
+        # every pending sub-request and let the pool serialize.
         limits = httpx.Limits(
             max_connections=max_concurrent, max_keepalive_connections=max_concurrent
         )
-        # ``None`` means "unbounded"; ``sys.maxsize`` stands in for it since
-        # ``asyncio.Semaphore`` only decrements a counter, never preallocates
-        # slots. Test ``is None`` explicitly so a stray ``0`` isn't silently
-        # promoted to unbounded by a falsy-``or``.
-        semaphore = asyncio.Semaphore(
-            sys.maxsize if max_concurrent is None else max_concurrent
-        )
 
         async with httpx.AsyncClient(limits=limits, **HTTPX_DEFAULTS) as client:
-            with _publish(_chunked_async_client, client):
+            with _publish(client):
                 reporter = _progress.current()
                 if reporter is not None:
                     reporter.set_chunks(self.plan.total)
@@ -1828,25 +1713,19 @@ class ChunkedCall:
                 async def track(
                     index: int, args: dict[str, Any]
                 ) -> tuple[pd.DataFrame, httpx.Response]:
-                    """One sub-request (with retry) + record + progress tick.
-
-                    The retry loop runs *inside* the semaphore, so a chunk
-                    backing off holds its slot — effective concurrency shrinks
-                    under throttling instead of re-bursting against it.
-                    """
-                    async with semaphore:
-                        result = await _retry_async(
-                            lambda: fetch_async(args), self.retry_policy
-                        )
+                    """One sub-request (with retry) + record + progress tick."""
+                    result = await _retry_async(
+                        lambda: self.fetch(args), self.retry_policy
+                    )
                     self.record(index, result)
                     if reporter is not None:
-                        # Parallel progress semantics: chunks finish out of
-                        # order, so tick the completed *count* rather than a
-                        # positional index (see :meth:`resume`).
+                        # Chunks finish out of order under gather, so tick the
+                        # completed *count* rather than a positional index.
                         reporter.start_chunk(self.completed_chunks)
                     return result
 
-                # Dispatch every pending sub-request concurrently.
+                # Dispatch every pending sub-request concurrently; the
+                # connection pool (``limits``) is the only throttle.
                 # ``return_exceptions`` keeps completed pairs after a sibling
                 # fails, so partial state stays recoverable via :meth:`resume`.
                 # Failure precedence, in order:
@@ -1885,11 +1764,10 @@ class ChunkedCall:
 def multi_value_chunked(
     *,
     build_request: Callable[..., httpx.Request],
-    fetch_async: _FetchOnceAsync | None = None,
     url_limit: int | None = None,
-) -> Callable[[_FetchOnce], _FetchOnce]:
+) -> Callable[[_Fetch], Callable[..., tuple[pd.DataFrame, Any]]]:
     """
-    Decorate a fetch function to transparently chunk over-budget requests.
+    Decorate an async fetcher to transparently chunk over-budget requests.
 
     Splits multi-value list params and cql-text filters across
     sub-requests so each fits the URL byte limit. Builds a
@@ -1897,13 +1775,18 @@ def multi_value_chunked(
     single-step plan, so the decorated function has one code path
     either way.
 
-    When ``API_USGS_CONCURRENT`` resolves to a parallelism greater than
-    1 (the default), the decorator routes execution through
-    :meth:`ChunkedCall.resume_async` over the provided ``fetch_async``, run in an
-    ``anyio`` worker-thread portal so it works whether or not the caller
-    is already inside an event loop (Jupyter / IPython / async apps). It
-    falls back to the synchronous :class:`ChunkedCall` path (with a
-    ``UserWarning``) only when ``fetch_async`` wasn't wired.
+    The decorated function is an ``async def fetch(args) -> (df,
+    response)``; the *returned wrapper is synchronous*. The wrapper builds
+    the :class:`ChunkPlan`, constructs a :class:`ChunkedCall` over the
+    async fetcher, and drives it to completion via
+    :meth:`ChunkedCall.resume` — which runs the async core in an ``anyio``
+    worker-thread portal so it works whether or not the caller is already
+    inside an event loop (Jupyter / IPython / async apps). Every pending
+    sub-request is gathered under one :class:`httpx.AsyncClient`;
+    concurrency is bounded purely by the connection pool, sized from
+    ``API_USGS_CONCURRENT``. ``API_USGS_CONCURRENT=1`` is just a
+    single-connection gather and ``plan.total <= 1`` a one-element gather
+    — neither is a special-cased path.
 
     Parameters
     ----------
@@ -1911,10 +1794,6 @@ def multi_value_chunked(
         Factory that turns a kwargs dict into a sized httpx request,
         e.g. ``_construct_api_requests``. Called during planning to
         measure each candidate plan.
-    fetch_async : Callable, optional
-        Async sibling of the decorated sync fetcher. Used when
-        ``API_USGS_CONCURRENT`` resolves to >1; if omitted, the
-        wrapper warns and stays on the serial path.
     url_limit : int, optional
         Byte budget for the request (URL + body). When ``None``
         (default), the module-level ``_WATERDATA_URL_BYTE_LIMIT`` is
@@ -1924,9 +1803,9 @@ def multi_value_chunked(
     Returns
     -------
     Callable
-        A decorator that wraps a ``fetch_once(args) -> (df, response)``
-        callable into one that accepts the same shape but executes the
-        underlying plan transparently.
+        A *synchronous* wrapper ``wrapper(args, *, finalize=...) ->
+        (df, response)`` that executes the underlying plan transparently
+        over the decorated async fetcher.
 
     Raises
     ------
@@ -1943,8 +1822,8 @@ def multi_value_chunked(
     ChunkedCall : Per-sub-request execution and resume semantics.
     """
 
-    def decorator(fetch_once: _FetchOnce) -> _FetchOnce:
-        @functools.wraps(fetch_once)
+    def decorator(fetch: _Fetch) -> Callable[..., tuple[pd.DataFrame, Any]]:
+        @functools.wraps(fetch)
         def wrapper(
             args: dict[str, Any],
             *,
@@ -1952,83 +1831,12 @@ def multi_value_chunked(
         ) -> tuple[pd.DataFrame, Any]:
             limit = _WATERDATA_URL_BYTE_LIMIT if url_limit is None else url_limit
             plan = ChunkPlan(args, build_request, limit)
-            concurrency = _read_concurrency_env()
             retry_policy = RetryPolicy.from_env()
-
-            # Trivial plans and explicit opt-outs stay on the sync
-            # path; ``_execute_in_parallel`` owns the rest of the
-            # serial/parallel decision (async wiring, running loop).
-            if plan.total <= 1 or concurrency == 1:
-                return plan.execute(fetch_once, retry_policy, finalize)
-            return _execute_in_parallel(
-                plan, fetch_once, fetch_async, concurrency, retry_policy, finalize
-            )
+            # The connection-pool cap is resolved inside ``resume()`` from
+            # ``API_USGS_CONCURRENT``; ``1`` is a single-connection gather,
+            # ``total <= 1`` a one-element gather — no special branch.
+            return plan.execute(fetch, retry_policy, finalize)
 
         return wrapper
 
     return decorator
-
-
-def _execute_in_parallel(
-    plan: ChunkPlan,
-    fetch_once: _FetchOnce,
-    fetch_async: _FetchOnceAsync | None,
-    concurrency: int | None,
-    retry_policy: RetryPolicy = _NO_RETRY,
-    finalize: _Finalize = _passthrough_result,
-) -> tuple[pd.DataFrame, Any]:
-    """
-    Run ``plan`` on the parallel async path.
-
-    Falls back to the serial sync path (with a one-time
-    :class:`UserWarning`) only when ``fetch_async`` wasn't wired into the
-    decorator. Otherwise it drives :meth:`ChunkedCall.resume_async` in a short-lived
-    worker thread via an ``anyio`` blocking portal, so the fan-out runs
-    whether or not the caller is already inside an event loop (Jupyter /
-    IPython / async apps) — no nested-``asyncio.run`` error and no silent
-    degradation to serial. The portal copies the calling context, so the
-    active progress reporter still reaches the fan-out.
-
-    Parameters
-    ----------
-    plan : ChunkPlan
-        The chunking plan to execute.
-    fetch_once : Callable
-        Sync per-sub-request fetcher returning ``(df, response)``, used
-        on the serial fallback path.
-    fetch_async : Callable or None
-        Async per-sub-request fetcher returning ``(df, response)``. When
-        ``None``, the call falls back to the serial sync path with a
-        :class:`UserWarning`.
-    concurrency : int or None
-        Maximum in-flight sub-requests. ``None`` disables the cap.
-    retry_policy : RetryPolicy, optional
-        Per-sub-request retry-with-backoff policy. Defaults to
-        :data:`_NO_RETRY`.
-    finalize : Callable, optional
-        Transform applied to the combined ``(frame, response)`` (see
-        :data:`_Finalize`). Defaults to :func:`_passthrough_result`.
-
-    Returns
-    -------
-    tuple of (pandas.DataFrame, finalized response)
-        The combined frame and the finalized aggregate response that
-        ``finalize`` produces.
-    """
-    if fetch_async is None:
-        warnings.warn(
-            f"{_CONCURRENCY_ENV} is set to {concurrency} but this "
-            f"call site has no async fetch sibling wired; falling "
-            f"back to the serial path. Either set "
-            f"{_CONCURRENCY_ENV}=1 to silence this warning or pass "
-            f"fetch_async= to @multi_value_chunked.",
-            UserWarning,
-            stacklevel=3,
-        )
-        return plan.execute(fetch_once, retry_policy, finalize)
-    call = ChunkedCall(plan, fetch_once, retry_policy, finalize)
-    fan_out = functools.partial(
-        call.resume_async, fetch_async, max_concurrent=concurrency
-    )
-    with start_blocking_portal() as portal:
-        return portal.call(fan_out)

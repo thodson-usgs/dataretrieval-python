@@ -42,14 +42,23 @@ from dataretrieval.waterdata.chunking import (
     RetryPolicy,
     ServiceInterrupted,
     ServiceUnavailable,
-    _chunked_client,
+    _chunked_async_client,
     _extract_axes,
     _retry_async,
-    _retry_sync,
     _retryable,
     multi_value_chunked,
 )
 from dataretrieval.waterdata.utils import _construct_api_requests
+
+
+def _aiozero(_d):
+    """An async no-op sleep — monkeypatched over ``chunking._ASLEEP`` so
+    retry backoff doesn't actually wait in tests."""
+
+    async def _noop():
+        return None
+
+    return _noop()
 
 
 class _FakeReq:
@@ -235,7 +244,7 @@ def test_multi_value_chunked_passes_through_when_url_fits():
     calls = []
 
     @multi_value_chunked(build_request=_fake_build, url_limit=8000)
-    def fetch(args):
+    async def fetch(args):
         calls.append(args)
         return pd.DataFrame(), mock.Mock(
             elapsed=datetime.timedelta(seconds=0.1), headers={}
@@ -254,7 +263,7 @@ def test_multi_value_chunked_emits_3d_cartesian_product():
     calls = []
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
-    def fetch(args):
+    async def fetch(args):
         calls.append(tuple(tuple(args[k]) for k in ("sites", "pcodes", "stats")))
         return pd.DataFrame(), mock.Mock(
             elapsed=datetime.timedelta(seconds=0.1), headers={}
@@ -303,7 +312,7 @@ def test_multi_value_chunked_lazy_url_limit(monkeypatch):
     calls = []
 
     @multi_value_chunked(build_request=_fake_build)  # url_limit defaults to None
-    def fetch(args):
+    async def fetch(args):
         calls.append(args)
         return pd.DataFrame(), mock.Mock(
             elapsed=datetime.timedelta(seconds=0.1), headers={}
@@ -317,20 +326,20 @@ def test_multi_value_chunked_lazy_url_limit(monkeypatch):
 
 def test_chunked_session_shared_across_sub_requests():
     """Every sub-request of one chunked call sees the same
-    ``httpx.Client`` on the ``_chunked_client`` ContextVar, so
-    downstream paginated helpers (``_walk_pages``) can reuse the
+    ``httpx.AsyncClient`` on the ``_chunked_async_client`` ContextVar, so
+    downstream paginated helpers (``_walk_pages_async``) can reuse the
     connection pool instead of handshaking fresh on each sub-request."""
     sessions_seen = []
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
-    def fetch(args):
-        sessions_seen.append(_chunked_client.get())
+    async def fetch(args):
+        sessions_seen.append(_chunked_async_client.get())
         return pd.DataFrame(), mock.Mock(
             elapsed=datetime.timedelta(seconds=0.1), headers={}
         )
 
-    # Outside a chunked call: no session published.
-    assert _chunked_client.get() is None
+    # Outside a chunked call: no session published (in this thread/context).
+    assert _chunked_async_client.get() is None
 
     fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
@@ -341,19 +350,22 @@ def test_chunked_session_shared_across_sub_requests():
     assert all(s is not None for s in sessions_seen)
     # And it was the same object every time.
     assert len({id(s) for s in sessions_seen}) == 1
-    # On exit the ContextVar is reset to its default.
-    assert _chunked_client.get() is None
+    # The portal's worker context is torn down on exit, so the calling
+    # thread's ContextVar still reads its default.
+    assert _chunked_async_client.get() is None
 
 
 def test_chunked_session_isolated_per_resume():
     """A follow-up ``resume`` after an interruption opens a fresh
     session — the previous one was closed when its ``resume`` returned.
-    The ContextVar is reset between calls so leakage can't carry
+    The ContextVar is reset between runs so leakage can't carry
     a closed session into the retry."""
     state = {"i": 0, "blow_up": True}
+    sessions_seen = []
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
-    def fetch(args):
+    async def fetch(args):
+        sessions_seen.append(_chunked_async_client.get())
         i = state["i"]
         state["i"] += 1
         if i == 1 and state["blow_up"]:
@@ -369,13 +381,23 @@ def test_chunked_session_isolated_per_resume():
     with pytest.raises(QuotaExhausted) as excinfo:
         fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
-    # First resume's session is closed; ContextVar is reset.
-    assert _chunked_client.get() is None
+    # First run published a shared client to its sub-requests; the calling
+    # thread's ContextVar is unaffected (reads its default).
+    assert _chunked_async_client.get() is None
+    first_run_sessions = list(sessions_seen)
+    assert first_run_sessions and all(s is not None for s in first_run_sessions)
 
     state["blow_up"] = False
     excinfo.value.call.resume()
-    # Second resume's session is also cleaned up.
-    assert _chunked_client.get() is None
+    # Second run's ContextVar is also reset in the calling thread.
+    assert _chunked_async_client.get() is None
+    # The resume opened a FRESH client, distinct from the first run's, so no
+    # closed client leaks across runs.
+    resume_sessions = sessions_seen[len(first_run_sessions) :]
+    assert resume_sessions and all(s is not None for s in resume_sessions)
+    assert {id(s) for s in resume_sessions}.isdisjoint(
+        {id(s) for s in first_run_sessions}
+    )
 
 
 def _quota_response(remaining: int | str | None) -> mock.Mock:
@@ -392,7 +414,7 @@ def test_quota_exhausted_on_mid_call_429():
     offset so callers can resume after the window resets."""
     state = {"i": 0}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2:
@@ -415,10 +437,12 @@ def test_quota_exhausted_on_mid_call_429():
         decorated({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10, "S5" * 10]})
 
     err = excinfo.value
-    assert err.completed_chunks == 2  # chunks 0 and 1 completed; 429 hit on i=2
+    # Async fan-out: every non-failing sub-request completes (the gather
+    # runs all of them; only i==2 raises), so 4 of 5 complete.
+    assert err.completed_chunks == 4  # only the i==2 sub-request failed
     assert err.total_chunks == 5
     assert err.partial_frame is not None
-    assert set(err.partial_frame["i"]) == {0, 1}
+    assert set(err.partial_frame["i"]) == {0, 1, 3, 4}
 
 
 def test_quota_exhausted_on_first_chunk_429_has_no_partial_response():
@@ -427,7 +451,7 @@ def test_quota_exhausted_on_first_chunk_429_has_no_partial_response():
     is empty) so callers can branch on that to distinguish "abort
     before any data arrived" from "abort after partial collection"."""
 
-    def fetch(args):
+    async def fetch(args):
         raise RateLimited("429: Too many requests made.")
 
     decorated = multi_value_chunked(build_request=_fake_build, url_limit=240)(fetch)
@@ -444,14 +468,18 @@ def test_quota_exhausted_resume_picks_up_where_429_stopped():
     once the window resets, ``e.call.resume()`` re-issues only the
     sub-requests that hadn't completed and returns the full combined
     result. Chunks completed before the 429 are not re-fetched."""
-    # The fake fetch 429s on the third call, then succeeds on every
-    # subsequent call. We track which sub-args have been issued so we
-    # can assert chunks 0/1 aren't re-fetched on resume.
+    # One sub-request (the chunk containing the failing site) 429s on the
+    # first gather, then succeeds once the window resets. Under the async
+    # fan-out every OTHER sub-request completes on the first gather, so
+    # resume re-issues only the single still-pending chunk. We track which
+    # sub-args have been issued to assert the completed chunks aren't
+    # re-fetched.
     fetched_sites: list[tuple[str, ...]] = []
+    failing_site = "S3" * 10
     rate_limited_once = {"fired": False}
 
-    def fetch(args):
-        if len(fetched_sites) == 2 and not rate_limited_once["fired"]:
+    async def fetch(args):
+        if failing_site in args["sites"] and not rate_limited_once["fired"]:
             rate_limited_once["fired"] = True
             raise RateLimited("429: Too many requests made.")
         site_tuple = tuple(args["sites"])
@@ -462,23 +490,24 @@ def test_quota_exhausted_resume_picks_up_where_429_stopped():
         )
 
     decorated = multi_value_chunked(build_request=_fake_build, url_limit=240)(fetch)
-    sites = ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10, "S5" * 10]
+    sites = ["S1" * 10, "S2" * 10, failing_site, "S4" * 10, "S5" * 10]
 
-    # First attempt: 429 on the third sub-request.
+    # First attempt: 429 on the chunk carrying the failing site; the other
+    # four sub-requests complete.
     with pytest.raises(QuotaExhausted) as excinfo:
         decorated({"sites": sites})
     err = excinfo.value
-    assert err.completed_chunks == 2
+    assert err.completed_chunks == 4
     pre_resume_count = len(fetched_sites)
-    assert pre_resume_count == 2  # chunks 0 and 1 completed
+    assert pre_resume_count == 4  # every chunk but the failing one completed
 
-    # Resume: re-issues only the still-pending sub-requests.
+    # Resume: re-issues only the still-pending sub-request.
     df, _ = err.call.resume()
 
-    # Three more fetches happened on resume (chunks 2, 3, 4); chunks 0
-    # and 1 were not re-fetched.
-    assert len(fetched_sites) - pre_resume_count == 3, (
-        f"expected 3 new fetches on resume (chunks 2, 3, 4); got "
+    # Exactly one more fetch happened on resume (the chunk that 429'd);
+    # the four already-completed chunks were not re-fetched.
+    assert len(fetched_sites) - pre_resume_count == 1, (
+        f"expected 1 new fetch on resume (the failing chunk); got "
         f"{len(fetched_sites) - pre_resume_count}"
     )
     # Every original site appears in the combined frame exactly once.
@@ -490,33 +519,33 @@ def test_quota_exhausted_resume_can_reraise_on_persistent_429():
     ``call.resume()`` raises ``QuotaExhausted`` again — the
     ``ChunkedCall``'s in-flight state carries forward, so a
     subsequent resume after a longer wait still picks up cleanly."""
-    state = {"attempts": 0}
+    # Key the failure on the chunk's CONTENT (one persistently-429ing
+    # site) rather than a global call counter: under the async fan-out
+    # every other sub-request completes, and the same still-pending
+    # sub-request re-fails on resume — so the completed count is stable.
+    failing_site = "S3" * 10
 
-    def fetch(args):
-        i = state["attempts"]
-        state["attempts"] += 1
-        # First attempt 429s on chunk 2. Resume attempt 429s on what
-        # would be chunk 2 again (still the first un-completed
-        # sub-request).
-        if i == 2 or i == 3:
+    async def fetch(args):
+        if failing_site in args["sites"]:
             raise RateLimited("429: Too many requests made.")
         return (
-            pd.DataFrame({"i": [i], "sites": list(args["sites"])}),
+            pd.DataFrame({"sites": list(args["sites"])}),
             _quota_response(500),
         )
 
     decorated = multi_value_chunked(build_request=_fake_build, url_limit=240)(fetch)
-    sites = ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10, "S5" * 10]
+    sites = ["S1" * 10, "S2" * 10, failing_site, "S4" * 10, "S5" * 10]
 
     with pytest.raises(QuotaExhausted) as first:
         decorated({"sites": sites})
     with pytest.raises(QuotaExhausted) as second:
         first.value.call.resume()
 
-    # Both exceptions report the same completed_chunks count — the
-    # second resume didn't make progress (it 429'd on the same chunk).
-    assert first.value.completed_chunks == 2
-    assert second.value.completed_chunks == 2
+    # Both exceptions report the same completed_chunks count — every
+    # sub-request but the persistently-429ing one completed on the first
+    # gather, and the resume re-issued only that one, which 429'd again.
+    assert first.value.completed_chunks == 4
+    assert second.value.completed_chunks == 4
 
 
 def test_resume_produces_dataset_identical_to_uninterrupted_run():
@@ -534,7 +563,7 @@ def test_resume_produces_dataset_identical_to_uninterrupted_run():
         keyed by the sub-args's sites."""
         state = {"calls": 0, "tripped": False}
 
-        def fetch(args):
+        async def fetch(args):
             state["calls"] += 1
             if state["calls"] == rate_limit_at_call and not state["tripped"]:
                 state["tripped"] = True
@@ -592,7 +621,7 @@ def test_chunker_passes_through_non_429_runtime_error():
     it must propagate unchanged so callers see the real cause."""
     state = {"i": 0}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2:
@@ -615,7 +644,7 @@ def test_chunker_wraps_service_unavailable_as_resumable():
     ``.call.resume()`` resumes only the still-pending sub-requests."""
     state = {"i": 0, "blow_up": True}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2 and state["blow_up"]:
@@ -634,7 +663,9 @@ def test_chunker_wraps_service_unavailable_as_resumable():
     err = excinfo.value
     # Resumable: handle on .call with already-completed work preserved.
     assert err.call is not None
-    assert err.completed_chunks == 2
+    # Async fan-out: only the i==2 sub-request fails; the gather completes
+    # the other four, so 4 of 5 are recorded before the failure surfaces.
+    assert err.completed_chunks == 4
     assert err.total_chunks == 5
     assert not err.call.partial_frame.empty
     # Upstream recovers; resuming completes the call.
@@ -667,7 +698,7 @@ def test_connection_error_wrapped_as_service_interrupted():
 
     state = {"i": 0, "blow_up": True}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2 and state["blow_up"]:
@@ -682,7 +713,8 @@ def test_connection_error_wrapped_as_service_interrupted():
         decorated({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10, "S5" * 10]})
 
     err = excinfo.value
-    assert err.completed_chunks == 2
+    # Async fan-out: only the i==2 sub-request fails; the other four complete.
+    assert err.completed_chunks == 4
     assert err.call is not None
     # The transport exception is on __cause__ so callers can drill in if needed.
     assert isinstance(err.__cause__, _httpx.ConnectError)
@@ -702,7 +734,7 @@ def test_invalid_url_wrapped_as_service_interrupted():
 
     state = {"i": 0, "blow_up": True}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2 and state["blow_up"]:
@@ -717,7 +749,8 @@ def test_invalid_url_wrapped_as_service_interrupted():
         decorated({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10, "S5" * 10]})
 
     err = excinfo.value
-    assert err.completed_chunks == 2
+    # Async fan-out: only the i==2 sub-request fails; the other four complete.
+    assert err.completed_chunks == 4
     assert err.call is not None
     assert isinstance(err.__cause__, _httpx.InvalidURL)
     # The top-level message must surface the underlying cause text so
@@ -738,7 +771,7 @@ def test_service_interrupted_exposes_partial_frame_and_response():
     crashed with AttributeError on 5xx."""
     state = {"i": 0}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2:
@@ -771,7 +804,7 @@ def test_partial_frame_snapshot_stable_across_resume():
     a name that promises pre-resume state."""
     state = {"i": 0, "blow_up": True}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2 and state["blow_up"]:
@@ -808,7 +841,7 @@ def test_partial_frame_snapshot_is_a_copy_when_single_chunk():
     ``pd.concat`` (which already produces a fresh frame)."""
     state = {"i": 0, "blow_up": True}
 
-    def fetch(args):
+    async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 1 and state["blow_up"]:
@@ -818,12 +851,13 @@ def test_partial_frame_snapshot_is_a_copy_when_single_chunk():
             _quota_response(500),
         )
 
-    # 4 sites at url_limit=240 → 2 sub-requests. The 429 fires on the
-    # SECOND sub-request, so the exception captures exactly ONE
-    # completed chunk — the path where _combine_chunk_frames aliases.
+    # 2 sites at url_limit=240 → 2 singleton sub-requests. The 429 fires
+    # on the SECOND sub-request and the gather completes the other, so the
+    # exception captures exactly ONE completed chunk — the path where
+    # _combine_chunk_frames aliases its single non-empty frame.
     decorated = multi_value_chunked(build_request=_fake_build, url_limit=240)(fetch)
     with pytest.raises(QuotaExhausted) as excinfo:
-        decorated({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+        decorated({"sites": ["S1" * 10, "S2" * 10]})
     err = excinfo.value
     assert err.completed_chunks == 1
 
@@ -887,7 +921,7 @@ def test_paginate_terminates_on_empty_string_cursor():
     resp.headers = {}
     resp.json.return_value = body_with_empty_next
 
-    client = _mock.MagicMock(spec=_httpx.Client)
+    client = _mock.AsyncMock(spec=_httpx.AsyncClient)
     client.send.return_value = resp
 
     req = _mock.MagicMock(spec=_httpx.Request)
@@ -896,7 +930,9 @@ def test_paginate_terminates_on_empty_string_cursor():
     req.content = b""
     req.url = "https://example.com/items?limit=1"
 
-    df, final = _utils._walk_pages(geopd=False, req=req, client=client)
+    df, final = asyncio.run(
+        _utils._walk_pages_async(geopd=False, req=req, client=client)
+    )
 
     # Single send + zero follow-ups: the loop terminated on the empty cursor.
     assert client.send.called
@@ -943,7 +979,7 @@ def test_retry_after_surfaces_on_quota_exhausted():
     can honor the server's hint instead of guessing a wait."""
     state = {"i": 0}
 
-    def fetch(args):
+    async def fetch(args):
         state["i"] += 1
         if state["i"] >= 3:
             try:
@@ -1050,7 +1086,7 @@ def test_multi_value_chunked_restores_canonical_url():
     sub_urls: list[str] = []
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
-    def fetch(args):
+    async def fetch(args):
         # Each sub-response carries the chunked sub_args's URL, so
         # without canonical restoration the first chunk's URL would
         # leak through to md.url.
@@ -1211,28 +1247,23 @@ def test_iter_sub_args_passthrough_yields_a_copy():
 
 # --- async fan-out path ----------------------------------------------------
 #
-# The conftest's ``_serial_chunker`` autouse pins ``API_USGS_CONCURRENT=1``
-# for the whole suite. Each test below overrides it so the wrapper takes
-# the parallel branch. The decorator's ``fetch_async`` accepts any
-# coroutine returning ``(df, response)`` — no real ``httpx.AsyncClient``
-# round-trip occurs, even though :meth:`ChunkedCall.resume_async` opens one
+# The chunker is async-only: every sub-request is gathered over one
+# ``httpx.AsyncClient`` and concurrency is bounded purely by that client's
+# connection pool, sized from ``API_USGS_CONCURRENT``. The conftest's
+# ``_serial_chunker`` autouse pins ``API_USGS_CONCURRENT=1`` (a single
+# connection) for the whole suite; each test below raises it so the gather
+# can dispatch sub-requests under a wider pool. The decorated async fetcher
+# is the SAME one used on both first-run and resume — there is no sync
+# sibling anymore. No real ``httpx.AsyncClient`` round-trip occurs (the
+# fakes return mock data), even though :meth:`ChunkedCall._run` opens one
 # for pool management.
 
 
 def _async_chunked_fetch(monkeypatch, fetch_async, *, max_concurrent=16):
-    """Decorate a deterministic chunkable fetch with the parallel
-    path forced on via ``API_USGS_CONCURRENT``."""
+    """Decorate a deterministic chunkable async fetch with a wide-pool
+    gather forced on via ``API_USGS_CONCURRENT``."""
     monkeypatch.setenv("API_USGS_CONCURRENT", str(max_concurrent))
-
-    @multi_value_chunked(
-        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
-    )
-    def fetch(args):
-        # Sync sibling — invoked on resume() after a parallel failure
-        # and never during the happy parallel path.
-        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
-
-    return fetch
+    return multi_value_chunked(build_request=_fake_build, url_limit=240)(fetch_async)
 
 
 def _atom_id(args):
@@ -1291,68 +1322,74 @@ def test_async_fan_out_failure_yields_resumable_call(monkeypatch):
     """A transient 5xx mid-fan-out raises ``ServiceInterrupted`` whose
     ``.call`` is a ``ChunkedCall`` holding the completed sub-requests
     in a sparse index map. ``exc.call.resume()`` re-issues only the
-    unfinished sub-requests, via the sync ``fetch_once`` path."""
-    call_count = {"async": 0, "sync": 0}
+    unfinished sub-requests — through the same async fetcher and the same
+    async runner, just on a fresh gather."""
+    # One async fetcher serves both first-run and resume. On the first
+    # gather it lets exactly one sub-request succeed and fails the rest
+    # transiently; once ``blow_up`` is cleared the resume gather completes
+    # every still-pending sub-request. ``calls`` counts every invocation
+    # across both gathers so we can assert resume only re-issued the owed
+    # sub-requests.
+    state = {"first_success": False, "blow_up": True}
+    calls = {"n": 0}
 
     async def fetch_async(args):
-        call_count["async"] += 1
-        # First sub-request succeeds; siblings fail.
-        if call_count["async"] == 1:
-            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
-        raise ServiceUnavailable("503: simulated")
-
-    monkeypatch.setenv("API_USGS_CONCURRENT", "16")
-
-    @multi_value_chunked(
-        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
-    )
-    def fetch(args):
-        call_count["sync"] += 1
+        calls["n"] += 1
+        if state["blow_up"]:
+            # Let the first dispatched sub-request through, fail the rest.
+            if not state["first_success"]:
+                state["first_success"] = True
+                return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(
+                    remaining=99
+                )
+            raise ServiceUnavailable("503: simulated")
         return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+
+    fetch = _async_chunked_fetch(monkeypatch, fetch_async)
 
     with pytest.raises(ServiceInterrupted) as exc_info:
         fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
     interrupted = exc_info.value
-    assert interrupted.call is not None, "parallel-mode interruption must be resumable"
-    # First sub-request completed; the rest still owe.
+    assert interrupted.call is not None, "interruption must be resumable"
+    # Exactly one sub-request completed; the rest still owe.
     assert interrupted.completed_chunks == 1
     assert interrupted.total_chunks > 1
 
-    # Resume on the sync path picks up only the missing sub-requests.
-    sync_before = call_count["sync"]
+    # Resume re-issues only the missing sub-requests, via the same async
+    # runner the first run used.
+    state["blow_up"] = False
+    calls_before = calls["n"]
     df, _ = interrupted.call.resume()
-    sync_calls_on_resume = call_count["sync"] - sync_before
-    assert sync_calls_on_resume == interrupted.total_chunks - 1
+    calls_on_resume = calls["n"] - calls_before
+    assert calls_on_resume == interrupted.total_chunks - 1
     # Final frame unions every sub-args.
     assert len(df) == interrupted.total_chunks
 
 
 def test_async_fan_out_resume_applies_finalize(monkeypatch):
-    """The ``finalize`` injected for a PARALLEL call survives the interruption
-    (carried on the ``ChunkedCall`` through the anyio portal), so a serial
-    ``exc.call.resume()`` still returns the finalized shape — guarding the
-    parallel resume_async -> resume -> finalize path the serial-pinned finalize
-    test can't reach. Partials stay raw (no finalize in the exception ctor)."""
+    """The ``finalize`` injected for a wide-pool call survives the
+    interruption (carried on the ``ChunkedCall`` through the anyio portal),
+    so ``exc.call.resume()`` still returns the finalized shape — guarding
+    the run -> resume -> finalize path. Partials stay raw (no finalize in
+    the exception ctor)."""
 
     def finalize(frame, response):
         return frame.assign(finalized=True), ("MD", response)
 
-    call_count = {"async": 0}
+    state = {"first_success": False, "blow_up": True}
 
     async def fetch_async(args):
-        call_count["async"] += 1
-        if call_count["async"] == 1:
-            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
-        raise ServiceUnavailable("503: simulated")
-
-    monkeypatch.setenv("API_USGS_CONCURRENT", "16")
-
-    @multi_value_chunked(
-        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
-    )
-    def fetch(args):
+        if state["blow_up"]:
+            if not state["first_success"]:
+                state["first_success"] = True
+                return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(
+                    remaining=99
+                )
+            raise ServiceUnavailable("503: simulated")
         return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+
+    fetch = _async_chunked_fetch(monkeypatch, fetch_async)
 
     sites = ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]
     with pytest.raises(ServiceInterrupted) as exc_info:
@@ -1361,29 +1398,35 @@ def test_async_fan_out_resume_applies_finalize(monkeypatch):
     # Partial snapshot stays raw — building the exception must not finalize.
     assert "finalized" not in exc_info.value.partial_frame.columns
     # Resume applies the finalize carried on the ChunkedCall.
+    state["blow_up"] = False
     df, md = exc_info.value.call.resume()
     assert "finalized" in df.columns
     assert md[0] == "MD"
 
 
-def test_async_falls_back_to_serial_when_no_fetch_async(monkeypatch):
-    """With no ``fetch_async=`` sibling wired, a parallel
-    ``API_USGS_CONCURRENT`` can't be honored, so the call falls back to
-    the serial ``ChunkedCall`` path with a one-time ``UserWarning``
-    rather than silently no-op'ing the env var."""
-    sync_calls = []
+def test_wide_concurrency_uses_async_fetcher_with_no_warning(monkeypatch):
+    """Re-expresses the old "falls back to serial when no async sibling
+    wired" intent for the async-only core: there is no async sibling to
+    wire and no serial fallback, so a wide ``API_USGS_CONCURRENT`` is
+    honored directly by the single async fetcher — every sub-request runs
+    on it and NO ``UserWarning`` is emitted (the env var is never silently
+    no-op'd, the previous regression that warning guarded)."""
+    import warnings
+
+    calls = []
     monkeypatch.setenv("API_USGS_CONCURRENT", "16")
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
-    def fetch(args):
-        sync_calls.append(tuple(args["sites"]))
+    async def fetch(args):
+        calls.append(tuple(args["sites"]))
         return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
 
-    with pytest.warns(UserWarning, match="no async fetch sibling"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any UserWarning would fail the test
         df, _ = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
-    assert len(sync_calls) > 1
-    assert len(df) == len(sync_calls)
+    assert len(calls) > 1  # the gather fanned out across every sub-request
+    assert len(df) == len(calls)
 
 
 def test_async_fan_out_runs_inside_running_event_loop(monkeypatch):
@@ -1394,17 +1437,15 @@ def test_async_fan_out_runs_inside_running_event_loop(monkeypatch):
     monkeypatch.setenv("API_USGS_CONCURRENT", "16")
     async_calls = []
 
-    async def fetch_async(args):
+    @multi_value_chunked(build_request=_fake_build, url_limit=240)
+    async def fetch(args):  # the single async fetcher — there is no sync sibling
         async_calls.append(tuple(args["sites"]))
         return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
 
-    @multi_value_chunked(
-        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
-    )
-    def fetch(args):  # sync sibling must NOT run — the async path handles it
-        raise AssertionError("serial fallback must not run inside a live loop")
-
     async def driver():  # call the sync getter from within a running loop
+        # The sync wrapper drives the async core through the anyio portal in
+        # a worker thread, so it works even inside a running event loop —
+        # neither a nested-``asyncio.run`` error nor a silent serial fallback.
         return fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
     df, _ = asyncio.run(driver())
@@ -1582,72 +1623,90 @@ def test_retryable_taxonomy():
 
 def test_retryable_skips_wrapped_midpagination_transient():
     # A transient surfaced mid-pagination is re-wrapped as RuntimeError by
-    # _paginate; it must NOT be auto-retried (re-walking from page 1 would
-    # re-spend quota) — it escalates to the resumable handle instead. Only
-    # the raw, top-level (initial-request) transient is retryable.
+    # _paginate_async; it must NOT be auto-retried (re-walking from page 1
+    # would re-spend quota) — it escalates to the resumable handle instead.
+    # Only the raw, top-level (initial-request) transient is retryable.
     assert _retryable(_wrap_cause(RateLimited("429", retry_after=3.0))) == (False, None)
     assert _retryable(RateLimited("429", retry_after=3.0)) == (True, 3.0)
 
 
-# -- sync driver ------------------------------------------------------------
+# -- async driver (the single retry driver; sync facade drives it) ----------
+#
+# The chunker is async-only now, so the retry loop lives solely in
+# ``_retry_async``. These tests pin the same behavioral contracts the old
+# ``_retry_sync`` tests asserted (transient-then-success, exhausted-reraises,
+# non-retryable-not-retried, long-retry-after-escalates), re-expressed on the
+# async driver and run via ``asyncio.run``; the sleep is patched to a no-op so
+# backoff doesn't actually wait.
 
 
-def test_retry_sync_transient_then_success(monkeypatch):
-    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+def test_retry_async_transient_then_recovers(monkeypatch):
+    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
     calls = {"n": 0}
 
-    def fn():
+    async def afn():
         calls["n"] += 1
         if calls["n"] <= 2:
             raise RateLimited("429")
         return "ok"
 
-    assert _retry_sync(fn, RetryPolicy(max_retries=3, base_backoff=0.0)) == "ok"
+    out = asyncio.run(_retry_async(afn, RetryPolicy(max_retries=3, base_backoff=0.0)))
+    assert out == "ok"
     assert calls["n"] == 3  # two failures + one success
 
 
-def test_retry_sync_exhausted_reraises(monkeypatch):
-    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+def test_retry_async_exhausted_reraises(monkeypatch):
+    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
     calls = {"n": 0}
 
-    def fn():
+    async def afn():
         calls["n"] += 1
         raise ServiceUnavailable("503")
 
     with pytest.raises(ServiceUnavailable):
-        _retry_sync(fn, RetryPolicy(max_retries=2, base_backoff=0.0))
+        asyncio.run(_retry_async(afn, RetryPolicy(max_retries=2, base_backoff=0.0)))
     assert calls["n"] == 3  # first attempt + 2 retries
 
 
-def test_retry_sync_non_retryable_not_retried(monkeypatch):
+def test_retry_async_non_retryable_not_retried(monkeypatch):
     slept: list[float] = []
-    monkeypatch.setattr(_chunking, "_SLEEP", slept.append)
+
+    def _record(delay):
+        slept.append(delay)
+        return _aiozero(delay)
+
+    monkeypatch.setattr(_chunking, "_ASLEEP", _record)
     calls = {"n": 0}
 
-    def fn():
+    async def afn():
         calls["n"] += 1
         raise RuntimeError("400: bad request")
 
     with pytest.raises(RuntimeError):
-        _retry_sync(fn, RetryPolicy(max_retries=3))
+        asyncio.run(_retry_async(afn, RetryPolicy(max_retries=3)))
     assert calls["n"] == 1 and slept == []
 
 
-def test_retry_sync_long_retry_after_escalates(monkeypatch):
+def test_retry_async_long_retry_after_escalates(monkeypatch):
     slept: list[float] = []
-    monkeypatch.setattr(_chunking, "_SLEEP", slept.append)
+
+    def _record(delay):
+        slept.append(delay)
+        return _aiozero(delay)
+
+    monkeypatch.setattr(_chunking, "_ASLEEP", _record)
     calls = {"n": 0}
 
-    def fn():
+    async def afn():
         calls["n"] += 1
         raise RateLimited("429", retry_after=999.0)
 
     with pytest.raises(RateLimited):
-        _retry_sync(fn, RetryPolicy(max_retries=5, retry_after_cap=60.0))
+        asyncio.run(_retry_async(afn, RetryPolicy(max_retries=5, retry_after_cap=60.0)))
     assert calls["n"] == 1 and slept == []  # no inline wait for a long window
 
 
-# -- async driver -----------------------------------------------------------
+# -- async driver (sleep-patched original) ----------------------------------
 
 
 def test_retry_async_transient_then_success(monkeypatch):
@@ -1674,10 +1733,10 @@ def test_chunker_retries_transient_then_completes(monkeypatch):
     """A transient on one sub-request is retried transparently; the
     decorated call completes with no ChunkInterrupted."""
     monkeypatch.setenv("API_USGS_RETRIES", "3")
-    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
     state = {"failed": False}
 
-    def fetch(args):
+    async def fetch(args):
         # Fail the first sub-request once, then succeed everywhere.
         if not state["failed"]:
             state["failed"] = True
@@ -1694,10 +1753,10 @@ def test_chunker_exhausted_retries_still_resumable(monkeypatch):
     """When retries are exhausted the failure still surfaces as a
     resumable ChunkInterrupted — retries don't swallow the escape hatch."""
     monkeypatch.setenv("API_USGS_RETRIES", "2")
-    monkeypatch.setattr(_chunking, "_SLEEP", lambda _d: None)
+    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
     attempts = {"n": 0}
 
-    def fetch(args):
+    async def fetch(args):
         sites = list(args["sites"])
         if "S1" * 10 in sites:
             attempts["n"] += 1
@@ -1783,7 +1842,7 @@ def test_resume_finalizes_but_partials_stay_raw(monkeypatch):
     state = {"n": 0}
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
-    def fetch(args):
+    async def fetch(args):
         state["n"] += 1
         if state["n"] == 2:
             raise ServiceUnavailable("503: simulated")

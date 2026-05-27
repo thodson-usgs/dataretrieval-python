@@ -6,6 +6,7 @@ gating, progress_context nesting, and that the pagination loop in
 reporter.
 """
 
+import asyncio
 import io
 import sys
 import types
@@ -20,7 +21,19 @@ from dataretrieval.waterdata._progress import (
     current,
     progress_context,
 )
-from dataretrieval.waterdata.utils import _walk_pages
+from dataretrieval.waterdata.utils import _walk_pages_async
+
+
+def _walk_pages(*, geopd, req, client):
+    """Drive the async ``_walk_pages_async`` to completion synchronously.
+
+    The chunker core is async-only now, so these tests build an
+    ``AsyncMock(spec=httpx.AsyncClient)`` whose ``.send``/``.request`` are
+    awaitable and run the coroutine via ``asyncio.run``. The progress
+    reporter is bound on a contextvar, which the coroutine inherits when
+    ``asyncio.run`` copies the calling context.
+    """
+    return asyncio.run(_walk_pages_async(geopd=geopd, req=req, client=client))
 
 
 @pytest.fixture(autouse=True)
@@ -355,7 +368,7 @@ def test_walk_pages_reports_pages_and_rate_limit():
     )
     resp2 = _resp([{"id": "2", "properties": {"v": "b"}}], rate_remaining="4998")
 
-    client = mock.MagicMock(spec=httpx.Client)
+    client = mock.AsyncMock(spec=httpx.AsyncClient)
     client.send.return_value = resp1
     client.request.return_value = resp2
 
@@ -380,7 +393,7 @@ def test_walk_pages_reports_pages_and_rate_limit():
 def test_walk_pages_without_context_does_not_error():
     # No active reporter: pagination must still work and stay silent.
     resp = _resp([{"id": "1", "properties": {"v": "a"}}])
-    client = mock.MagicMock(spec=httpx.Client)
+    client = mock.AsyncMock(spec=httpx.AsyncClient)
     client.send.return_value = resp
 
     req = mock.MagicMock(spec=httpx.Request)
@@ -400,7 +413,7 @@ def test_broken_progress_stream_does_not_truncate_pagination():
         [{"id": "1", "properties": {"v": "a"}}], next_url="https://example.com/p2"
     )
     resp2 = _resp([{"id": "2", "properties": {"v": "b"}}])
-    client = mock.MagicMock(spec=httpx.Client)
+    client = mock.AsyncMock(spec=httpx.AsyncClient)
     client.send.return_value = resp1
     client.request.return_value = resp2
 
@@ -484,10 +497,11 @@ def test_paginate_async_reports_pages_through_active_reporter(monkeypatch):
 
 
 def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
-    """``_fan_out_async`` records ``plan.total`` on the active reporter
-    so the progress line knows how many sub-requests are in flight.
-    It deliberately does NOT call ``start_chunk`` (which would be
-    misleading under parallel fan-out — chunks fire concurrently)."""
+    """The async fan-out core (``ChunkedCall._run``) records
+    ``plan.total`` on the active reporter so the progress line knows how
+    many sub-requests are in flight, and ticks ``current_chunk`` via
+    ``start_chunk(len(completed))`` as each gathered sub-request finishes
+    — reaching ``plan.total`` in the all-success case."""
     import asyncio
 
     import pandas as pd
@@ -517,16 +531,14 @@ def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
             headers={"x-ratelimit-remaining": "999"},
         )
 
-    def fetch_once(args):  # noqa: ARG001 — never invoked on the happy parallel path
-        raise AssertionError("sync fetch must not run in this test")
-
     stream = io.StringIO()
 
     async def run():
+        # Drive the async execution core directly (the same coroutine the
+        # sync ``resume()`` facade runs through the anyio portal); the
+        # decorated async fetcher is the only fetcher now.
         with progress_context(service="daily", stream=stream, enabled=True) as rep:
-            await ChunkedCall(plan, fetch_once).resume_async(
-                fetch_async, max_concurrent=4
-            )
+            await ChunkedCall(plan, fetch_async)._run(4)
             return rep.total_chunks, rep.current_chunk
 
     total_recorded, current_recorded = asyncio.run(run())

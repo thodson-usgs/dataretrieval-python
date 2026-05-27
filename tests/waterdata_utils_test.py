@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from unittest import mock
@@ -16,10 +17,22 @@ from dataretrieval.waterdata.utils import (
     _handle_stats_nesting,
     _parse_retry_after,
     _raise_for_non_200,
-    _walk_pages,
+    _walk_pages_async,
 )
 
 _LOGGER_NAME = _utils_module.__name__
+
+
+def _walk_pages(*, geopd, req, client):
+    """Drive the async ``_walk_pages_async`` to completion synchronously.
+
+    The chunker core is async-only now, so these tests build an
+    ``AsyncMock(spec=httpx.AsyncClient)`` whose ``.send``/``.request`` are
+    awaitable and run the coroutine via ``asyncio.run``. This thin shim
+    keeps the historical sync-shaped call sites terse while exercising the
+    real async pagination loop.
+    """
+    return asyncio.run(_walk_pages_async(geopd=geopd, req=req, client=client))
 
 
 def test_get_args_basic():
@@ -74,7 +87,7 @@ def test_walk_pages_multiple_mocked():
     resp2.status_code = 200
 
     # Mock client (Session)
-    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
     # First call to send() returns resp1, then call to request() in loop returns resp2
     mock_client.send.return_value = resp1
     mock_client.request.return_value = resp2
@@ -112,7 +125,7 @@ def test_row_cap_truncates_and_stops_within_first_page():
     resp1.status_code = 200
     resp1.url = "https://example.com/page1"
 
-    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
     mock_client.send.return_value = resp1
 
     mock_req = mock.MagicMock(spec=httpx.Request)
@@ -145,7 +158,7 @@ def test_row_cap_stops_across_pages():
         resp.url = f"https://example.com/page{idx}"
         return resp
 
-    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
     mock_client.send.return_value = _page(1, has_next=True)
     # page 2 still advertises a ``next`` (page 3) that must never be fetched.
     mock_client.request.return_value = _page(2, has_next=True)
@@ -208,7 +221,7 @@ def _walk_pages_with_failure(failure_resp_or_exc):
     """Run _walk_pages where page 1 succeeds and page 2 fails as given."""
     resp1 = _resp_ok([{"id": "1", "properties": {"val": "a"}}])
 
-    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
     mock_client.send.return_value = resp1
     if isinstance(failure_resp_or_exc, BaseException):
         mock_client.request.side_effect = failure_resp_or_exc
@@ -299,7 +312,7 @@ def test_walk_pages_wraps_initial_page_parse_error():
     # Body is unparseable JSON (gateway HTML page, truncated stream).
     resp.json.side_effect = json.JSONDecodeError("Expecting value", "<html>...", 0)
 
-    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
     mock_client.send.return_value = resp
 
     mock_req = mock.MagicMock(spec=httpx.Request)
@@ -394,7 +407,7 @@ def test_walk_pages_does_not_mutate_initial_response():
         "links": [],
     }
 
-    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
     mock_client.send.return_value = page1
     mock_client.request.return_value = page2
 
@@ -448,7 +461,7 @@ def _run_get_stats_data_with_failure(failure_resp_or_exc, monkeypatch):
         mock.MagicMock(return_value=pd.DataFrame()),
     )
 
-    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
     mock_client.send.return_value = _stats_initial_ok()
     if isinstance(failure_resp_or_exc, BaseException):
         mock_client.request.side_effect = failure_resp_or_exc
