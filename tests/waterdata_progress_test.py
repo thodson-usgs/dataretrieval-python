@@ -7,12 +7,14 @@ reporter.
 """
 
 import asyncio
+import datetime
 import io
 import sys
 import types
 from unittest import mock
 
 import httpx
+import pandas as pd
 import pytest
 
 from dataretrieval.waterdata import _progress
@@ -21,7 +23,8 @@ from dataretrieval.waterdata._progress import (
     current,
     progress_context,
 )
-from dataretrieval.waterdata.utils import _walk_pages
+from dataretrieval.waterdata.chunking import ChunkedCall, ChunkPlan
+from dataretrieval.waterdata.utils import _paginate, _walk_pages
 
 
 def _run_walk_pages(*, geopd, req, client):
@@ -428,18 +431,14 @@ def test_broken_progress_stream_does_not_truncate_pagination():
     assert len(df) == 2  # both pages returned despite the broken progress stream
 
 
-# -- async path integration ----------------------------------------------------
+# -- pagination integration ----------------------------------------------------
 
 
 def test_paginate_reports_pages_through_active_reporter(monkeypatch):
-    """The async paginate path must drive the same progress reporter the
-    sync path does. Pages and rate-limit updates from each completed
-    page should land via the active ``ProgressReporter``, exactly as
-    they would on ``_walk_pages``."""
-    import asyncio
-
-    from dataretrieval.waterdata.utils import _paginate
-
+    """The async paginate path must drive the same progress reporter.
+    Pages and rate-limit updates from each completed page should land
+    via the active ``ProgressReporter``, exactly as they would on
+    ``_walk_pages``."""
     resp1 = _resp(
         [{"id": "1", "properties": {"v": "a"}}],
         next_url="https://example.com/p2",
@@ -454,14 +453,12 @@ def test_paginate_reports_pages_through_active_reporter(monkeypatch):
         )
         return mock.MagicMock(empty=False, __len__=lambda self: 1), nxt
 
-    # _paginate expects parse_response to be sync, like the sync path.
+    # parse_response is sync (like the page parsers).
     def parse_sync(resp):
         body = resp.json()
         nxt = next(
             (link["href"] for link in body["links"] if link["rel"] == "next"), None
         )
-        import pandas as pd
-
         return pd.DataFrame(body["features"]), nxt
 
     async def follow_up(cursor, sess):
@@ -502,11 +499,6 @@ def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
     many sub-requests are in flight, and ticks ``current_chunk`` via
     ``start_chunk(len(completed))`` as each gathered sub-request finishes
     — reaching ``plan.total`` in the all-success case."""
-    import asyncio
-
-    import pandas as pd
-
-    from dataretrieval.waterdata.chunking import ChunkedCall, ChunkPlan
 
     # Fake build_request whose URL length scales with the sites list,
     # mirroring the planner's _request_bytes contract. _FakeReq has the
@@ -527,7 +519,7 @@ def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
 
     async def fetch_async(args):
         return pd.DataFrame({"id": [",".join(args["sites"])]}), mock.Mock(
-            elapsed=__import__("datetime").timedelta(seconds=0.01),
+            elapsed=datetime.timedelta(seconds=0.01),
             headers={"x-ratelimit-remaining": "999"},
         )
 
@@ -535,8 +527,7 @@ def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
 
     async def run():
         # Drive the async execution core directly (the same coroutine the
-        # sync ``resume()`` facade runs through the anyio portal); the
-        # decorated async fetcher is the only fetcher now.
+        # sync ``resume()`` facade runs through the anyio portal).
         with progress_context(service="daily", stream=stream, enabled=True) as rep:
             await ChunkedCall(plan, fetch_async)._run(4)
             return rep.total_chunks, rep.current_chunk

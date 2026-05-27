@@ -3,6 +3,7 @@ import json
 import sys
 from unittest import mock
 
+import numpy as np
 import pandas as pd
 import pytest
 from pandas import DataFrame
@@ -564,8 +565,6 @@ def test_get_reference_table_accepts_numpy_int_max_rows():
     # numpy integers are valid caps: isinstance(np.int64, int) is False, so the
     # validation must accept numbers.Integral (not just int) — otherwise a cap
     # derived from a numpy/pandas computation is wrongly rejected.
-    import numpy as np
-
     df, _ = get_reference_table("agency-codes", max_rows=np.int64(2))
     assert len(df) == 2
 
@@ -712,8 +711,6 @@ class TestNormalizeStrIterable:
         assert isinstance(result, list)
 
     def test_numpy_array_normalizes_to_list(self):
-        import numpy as np
-
         result = _normalize_str_iterable(np.array(["00060", "00010"]), "p")
         assert result == ["00060", "00010"]
         assert isinstance(result, list)

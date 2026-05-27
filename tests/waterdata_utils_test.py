@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import logging
 from unittest import mock
@@ -10,14 +11,21 @@ import pytest
 import dataretrieval.waterdata.utils as _utils_module
 from dataretrieval.waterdata.chunking import RateLimited, ServiceUnavailable
 from dataretrieval.waterdata.utils import (
+    OGC_API_URL,
     _arrange_cols,
+    _check_ogc_requests,
     _error_body,
+    _finalize_ogc,
     _format_api_dates,
     _get_args,
+    _get_resp_data,
     _handle_stats_nesting,
+    _next_req_url,
     _parse_retry_after,
     _raise_for_non_200,
+    _row_cap,
     _walk_pages,
+    get_stats_data,
 )
 
 _LOGGER_NAME = _utils_module.__name__
@@ -113,8 +121,6 @@ def test_row_cap_truncates_and_stops_within_first_page():
     # Regression for BUG 2: ``_row_cap`` bounds the TOTAL rows. A first page
     # already over the cap is truncated to exactly ``max_rows`` and the
     # ``next`` link is never followed.
-    from dataretrieval.waterdata.utils import _row_cap
-
     resp1 = mock.MagicMock()
     resp1.json.return_value = {
         "numberReturned": 3,
@@ -143,8 +149,6 @@ def test_row_cap_truncates_and_stops_within_first_page():
 def test_row_cap_stops_across_pages():
     # The cap accumulates across pages: page 1 (1 row) is under the cap so
     # page 2 is fetched; once the cap (2) is met the third page is NOT.
-    from dataretrieval.waterdata.utils import _row_cap
-
     def _page(idx, *, has_next):
         resp = mock.MagicMock()
         nxt = f"https://example.com/page{idx + 1}"
@@ -179,10 +183,6 @@ def test_finalize_ogc_truncates_combined_to_max_rows():
     # max_rows is enforced on the *combined* frame in _finalize_ogc (after
     # dedup/sort), so it bounds the total exactly even when a chunked call's
     # per-sub-request pages overshoot the per-_paginate early-stop.
-    import datetime
-
-    from dataretrieval.waterdata.utils import _finalize_ogc
-
     frame = pd.DataFrame({"id": [str(i) for i in range(10)]})
     resp = mock.MagicMock()
     resp.url = "https://example.com/q"
@@ -334,8 +334,6 @@ def test_get_resp_data_handles_missing_features_key():
     ``_paginate`` as a generic transport error. ``_handle_stats_nesting``
     was already hardened against this; ``_get_resp_data`` now mirrors
     that defensiveness and returns an empty frame instead."""
-    from dataretrieval.waterdata.utils import _get_resp_data
-
     resp = mock.Mock()
     resp.json.return_value = {"numberReturned": 1, "links": []}
     df = _get_resp_data(resp, geopd=False)
@@ -350,12 +348,10 @@ def test_walk_pages_does_not_mutate_initial_response():
     ``.elapsed`` before pagination completed (a Session response hook,
     a logging middleware) must continue to see the original first-page
     values — NOT the rewritten cumulative values."""
-    import datetime as _dt
-
     page1 = mock.MagicMock()
     page1.status_code = 200
     page1.url = "https://example.com/page1"
-    page1.elapsed = _dt.timedelta(seconds=1)
+    page1.elapsed = datetime.timedelta(seconds=1)
     page1.headers = {"x-ratelimit-remaining": "999"}
     page1.json.return_value = {
         "numberReturned": 1,
@@ -368,7 +364,7 @@ def test_walk_pages_does_not_mutate_initial_response():
     page2 = mock.MagicMock()
     page2.status_code = 200
     page2.url = "https://example.com/page2"
-    page2.elapsed = _dt.timedelta(seconds=2)
+    page2.elapsed = datetime.timedelta(seconds=2)
     page2.headers = {"x-ratelimit-remaining": "998"}
     page2.json.return_value = {
         "numberReturned": 1,
@@ -396,7 +392,7 @@ def test_walk_pages_does_not_mutate_initial_response():
 
     # The returned aggregate carries page-2 headers + cumulative elapsed.
     assert final.headers["x-ratelimit-remaining"] == "998"
-    assert final.elapsed == _dt.timedelta(seconds=3)
+    assert final.elapsed == datetime.timedelta(seconds=3)
     # And mutating the aggregate's headers doesn't leak into either page.
     final.headers["X-Trace-Id"] = "abc"
     assert "X-Trace-Id" not in page1.headers
@@ -422,8 +418,6 @@ def _run_get_stats_data_with_failure(failure_resp_or_exc, monkeypatch):
     `monkeypatch` stubs ``_handle_stats_nesting`` so the synthetic minimal
     response body doesn't need to parse — these tests only assert on the
     pagination loop's error surfacing."""
-    from dataretrieval.waterdata.utils import get_stats_data
-
     monkeypatch.setattr(
         _utils_module,
         "_handle_stats_nesting",
@@ -547,8 +541,6 @@ def test_get_resp_data_empty_preserves_geopd_type():
     ``GeoDataFrame`` (not a plain ``DataFrame``) when geopd is True,
     so paginating across a sparse intermediate page doesn't downgrade
     the final concat result."""
-    from dataretrieval.waterdata.utils import _get_resp_data
-
     fake_gpd = mock.MagicMock()
 
     class _Sentinel:
@@ -578,8 +570,6 @@ def test_get_resp_data_always_materializes_id_column():
     ``_arrange_cols`` rename to the service-specific output_id
     (``daily_id``, ``channel_measurements_id``, etc.) isn't a
     silent no-op."""
-    from dataretrieval.waterdata.utils import _get_resp_data
-
     resp = mock.MagicMock()
     resp.json.return_value = {
         "numberReturned": 2,
@@ -704,8 +694,6 @@ def test_format_api_dates_rejects_mapping():
     """`time={"2024-01-01": "x"}` would silently materialize as the keys list,
     accepting input the user clearly didn't intend.
     """
-    import pytest
-
     with pytest.raises(TypeError, match="date input must be a string or sequence"):
         _format_api_dates({"2024-01-01": "ignored"})
 
@@ -848,8 +836,6 @@ def test_next_req_url_rejects_cross_host():
     auth-like artifacts) were minted for the original host; following
     a server-supplied cross-host URL would leak them — and the URL
     itself could be sensitive."""
-    from dataretrieval.waterdata.utils import _next_req_url
-
     resp = mock.MagicMock()
     resp.url = httpx.URL("https://api.waterdata.usgs.gov/page1")
     body = {
@@ -867,9 +853,6 @@ def test_check_ogc_requests_raises_typed_on_5xx(httpx_mock):
     ``_raise_for_non_200`` so callers see ``ServiceUnavailable`` /
     ``RateLimited`` / ``RuntimeError`` — the same typed contract as
     the main data path."""
-    from dataretrieval.waterdata.chunking import ServiceUnavailable
-    from dataretrieval.waterdata.utils import OGC_API_URL, _check_ogc_requests
-
     httpx_mock.add_response(
         method="GET",
         url=f"{OGC_API_URL}/collections/daily/schema",

@@ -19,10 +19,12 @@ import asyncio
 import concurrent.futures
 import datetime
 import sys
+import warnings
 from unittest import mock
 from urllib.parse import quote_plus
 
 import httpx
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -30,8 +32,10 @@ if sys.version_info < (3, 10):
     pytest.skip("Skip entire module on Python < 3.10", allow_module_level=True)
 
 from dataretrieval.waterdata import chunking as _chunking
+from dataretrieval.waterdata import utils as _utils
 from dataretrieval.waterdata.chunking import (
     _LIST_SEP,
+    _NEVER_CHUNK,
     _OR_SEP,
     _QUOTA_HEADER,
     ChunkInterrupted,
@@ -43,12 +47,16 @@ from dataretrieval.waterdata.chunking import (
     ServiceInterrupted,
     ServiceUnavailable,
     _chunked_client,
+    _combine_chunk_frames,
+    _combine_chunk_responses,
     _extract_axes,
+    _request_bytes,
     _retry,
     _retryable,
+    _safe_request_bytes,
     multi_value_chunked,
 )
-from dataretrieval.waterdata.utils import _construct_api_requests
+from dataretrieval.waterdata.utils import _DATE_RANGE_PARAMS, _construct_api_requests
 
 
 def _aiozero(_d):
@@ -103,9 +111,6 @@ def test_never_chunk_covers_all_date_range_params():
     adding a new param to ``_DATE_RANGE_PARAMS`` without also adding
     it to ``_NEVER_CHUNK`` would silently let the chunker try to
     comma-join an interval string."""
-    from dataretrieval.waterdata.chunking import _NEVER_CHUNK
-    from dataretrieval.waterdata.utils import _DATE_RANGE_PARAMS
-
     missing = _DATE_RANGE_PARAMS - _NEVER_CHUNK
     assert not missing, (
         f"_DATE_RANGE_PARAMS contains entries not in _NEVER_CHUNK: "
@@ -694,15 +699,13 @@ def test_connection_error_wrapped_as_service_interrupted():
     and the user would lose the resumable handle to ``.call.resume()``.
     Verify ``ChunkedCall`` wraps it as ``ServiceInterrupted`` so
     partial progress is preserved."""
-    import httpx as _httpx
-
     state = {"i": 0, "blow_up": True}
 
     async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2 and state["blow_up"]:
-            raise _httpx.ConnectError("connection reset")
+            raise httpx.ConnectError("connection reset")
         return (
             pd.DataFrame({"sites": list(args["sites"])}),
             _quota_response(500),
@@ -717,7 +720,7 @@ def test_connection_error_wrapped_as_service_interrupted():
     assert err.completed_chunks == 4
     assert err.call is not None
     # The transport exception is on __cause__ so callers can drill in if needed.
-    assert isinstance(err.__cause__, _httpx.ConnectError)
+    assert isinstance(err.__cause__, httpx.ConnectError)
     # Resume after the upstream recovers.
     state["blow_up"] = False
     df, _ = err.call.resume()
@@ -730,15 +733,13 @@ def test_invalid_url_wrapped_as_service_interrupted():
     ``_classify_chunk_error`` an oversize follow-up URL escapes as
     raw ``InvalidURL`` and the user loses ``.call.resume()`` access
     to the partial state. Mirror the ConnectError test."""
-    import httpx as _httpx
-
     state = {"i": 0, "blow_up": True}
 
     async def fetch(args):
         i = state["i"]
         state["i"] += 1
         if i == 2 and state["blow_up"]:
-            raise _httpx.InvalidURL("URL is too long: 65536 bytes > 65000")
+            raise httpx.InvalidURL("URL is too long: 65536 bytes > 65000")
         return (
             pd.DataFrame({"sites": list(args["sites"])}),
             _quota_response(500),
@@ -752,7 +753,7 @@ def test_invalid_url_wrapped_as_service_interrupted():
     # Async fan-out: only the i==2 sub-request fails; the other four complete.
     assert err.completed_chunks == 4
     assert err.call is not None
-    assert isinstance(err.__cause__, _httpx.InvalidURL)
+    assert isinstance(err.__cause__, httpx.InvalidURL)
     # The top-level message must surface the underlying cause text so
     # the user doesn't have to traverse ``__cause__`` to know what
     # actually failed (previously the message was generic "Service
@@ -875,8 +876,6 @@ def test_combine_chunk_responses_returns_independent_headers():
     hooks, metadata extensions) must not back-propagate into the
     underlying chunk response's headers, which still live on
     ``ChunkedCall._chunks``."""
-    from dataretrieval.waterdata.chunking import _combine_chunk_responses
-
     r0 = mock.Mock(
         elapsed=datetime.timedelta(seconds=0.1), headers={"X-Foo": "0"}, url="u0"
     )
@@ -899,13 +898,6 @@ def test_paginate_terminates_on_empty_string_cursor():
     coerce falsy non-None values to None so an empty-string next-
     cursor (a real-but-unusual end-of-stream sentinel some pagination
     APIs use) doesn't trap us in an infinite ``follow_up('')`` loop."""
-    import datetime as _dt
-    from unittest import mock as _mock
-
-    import httpx as _httpx
-
-    from dataretrieval.waterdata import utils as _utils
-
     # Synthesize an OGC response with numberReturned > 0 and a "next"
     # link whose href is an empty string — simulating a server-side
     # sentinel that ``_next_req_url`` reads as ``""``.
@@ -914,17 +906,17 @@ def test_paginate_terminates_on_empty_string_cursor():
         "features": [{"id": "1", "properties": {"val": "a"}}],
         "links": [{"rel": "next", "href": ""}],
     }
-    resp = _mock.MagicMock(spec=_httpx.Response)
+    resp = mock.MagicMock(spec=httpx.Response)
     resp.status_code = 200
     resp.url = "https://example.com/items?limit=1"
-    resp.elapsed = _dt.timedelta(seconds=0.1)
+    resp.elapsed = datetime.timedelta(seconds=0.1)
     resp.headers = {}
     resp.json.return_value = body_with_empty_next
 
-    client = _mock.AsyncMock(spec=_httpx.AsyncClient)
+    client = mock.AsyncMock(spec=httpx.AsyncClient)
     client.send.return_value = resp
 
-    req = _mock.MagicMock(spec=_httpx.Request)
+    req = mock.MagicMock(spec=httpx.Request)
     req.method = "GET"
     req.headers = {}
     req.content = b""
@@ -943,10 +935,6 @@ def test_combine_chunk_frames_does_not_collapse_none_ids():
     so a blanket dedup would collapse every id-less row into one —
     silent data loss. The function must dedupe only the id-bearing
     rows and preserve id-less rows verbatim."""
-    import numpy as np
-
-    from dataretrieval.waterdata.chunking import _combine_chunk_frames
-
     # Frame A has real ids; frame B has feature-IDs of None for two
     # different rows that must both survive.
     df_a = pd.DataFrame({"id": ["x", "y"], "val": [1, 2]})
@@ -962,8 +950,6 @@ def test_combine_chunk_frames_still_dedupes_overlapping_ids():
     """The original dedup contract — overlapping OR-clause partitions
     that produce duplicate-id rows across chunks must still collapse
     to one row — has to keep working when ids ARE present."""
-    from dataretrieval.waterdata.chunking import _combine_chunk_frames
-
     df_a = pd.DataFrame({"id": ["x", "y"], "val": [1, 2]})
     df_b = pd.DataFrame({"id": ["y", "z"], "val": [2, 3]})
     combined = _combine_chunk_frames([df_a, df_b])
@@ -1016,10 +1002,6 @@ def test_request_bytes_sums_url_and_content():
     the chunker just needs to size that single attribute alongside
     the URL.
     """
-    import httpx
-
-    from dataretrieval.waterdata.chunking import _request_bytes
-
     # GET request with no body
     req = httpx.Request("GET", "https://x.example/ab")
     assert _request_bytes(req) == len("https://x.example/ab")
@@ -1037,9 +1019,6 @@ def test_safe_request_bytes_treats_invalid_url_as_overflow():
     contract is that ``_safe_request_bytes`` returns ``url_limit + 1``
     (a value strictly greater than the limit) when ``build_request``
     raises ``InvalidURL``."""
-    import httpx
-
-    from dataretrieval.waterdata.chunking import _safe_request_bytes
 
     def build_request(**kwargs):
         raise httpx.InvalidURL("URL too long")
@@ -1054,8 +1033,6 @@ def test_chunk_plan_handles_initial_url_overflow():
     crash ``ChunkPlan.__init__``; the planner falls back to a
     worst-case sub-request URL for ``canonical_url`` and proceeds to
     halve the over-limit axes normally."""
-    import httpx
-
     real_build = _fake_build
 
     def overflowing_build(**kwargs):
@@ -1208,8 +1185,6 @@ def test_combine_chunk_frames_all_empty_preserves_geo_type():
     pytest.importorskip("geopandas")
     import geopandas as gpd
 
-    from dataretrieval.waterdata.chunking import _combine_chunk_frames
-
     empty_gdfs = [gpd.GeoDataFrame() for _ in range(3)]
     combined = _combine_chunk_frames(empty_gdfs)
     assert isinstance(combined, gpd.GeoDataFrame), (
@@ -1222,8 +1197,6 @@ def test_combine_chunk_frames_single_frame_is_safe_to_mutate():
     input on the single-chunk fast path — a caller mutating
     ``call.partial_frame`` (a live view) must not back-propagate into
     the underlying ``_chunks[0][0]`` frame."""
-    from dataretrieval.waterdata.chunking import _combine_chunk_frames
-
     chunk = pd.DataFrame({"id": ["A", "B"], "value": [1, 2]})
     returned = _combine_chunk_frames([chunk])
     returned["new_col"] = "x"
@@ -1245,16 +1218,15 @@ def test_iter_sub_args_passthrough_yields_a_copy():
 
 # --- async fan-out path ----------------------------------------------------
 #
-# The chunker is async-only: every sub-request is gathered over one
-# ``httpx.AsyncClient`` and concurrency is bounded purely by that client's
-# connection pool, sized from ``API_USGS_CONCURRENT``. The conftest's
-# ``_serial_chunker`` autouse pins ``API_USGS_CONCURRENT=1`` (a single
-# connection) for the whole suite; each test below raises it so the gather
-# can dispatch sub-requests under a wider pool. The decorated async fetcher
-# is the SAME one used on both first-run and resume — there is no sync
-# sibling anymore. No real ``httpx.AsyncClient`` round-trip occurs (the
-# fakes return mock data), even though :meth:`ChunkedCall._run` opens one
-# for pool management.
+# Every sub-request is gathered over one ``httpx.AsyncClient`` and
+# concurrency is bounded purely by that client's connection pool, sized
+# from ``API_USGS_CONCURRENT``. The conftest's ``_pin_chunker_env``
+# autouse pins ``API_USGS_CONCURRENT=1`` (a single connection) for the
+# whole suite; each test below raises it so the gather can dispatch
+# sub-requests under a wider pool. The decorated async fetcher is the
+# SAME one used on both first-run and resume. No real ``httpx.AsyncClient``
+# round-trip occurs (the fakes return mock data), even though
+# :meth:`ChunkedCall._run` opens one for pool management.
 
 
 def _async_chunked_fetch(monkeypatch, fetch_async, *, max_concurrent=16):
@@ -1275,8 +1247,8 @@ def _ok_response(remaining=None):
 
 
 def test_async_fan_out_emits_one_call_per_sub_request(monkeypatch):
-    """Parallel mode hits every sub-args once — same coverage as the
-    sync ``ChunkedCall`` path, just dispatched concurrently."""
+    """The fan-out hits every sub-args exactly once, dispatched
+    concurrently."""
     seen_args = []
 
     async def fetch_async(args):
@@ -1403,14 +1375,9 @@ def test_async_fan_out_resume_applies_finalize(monkeypatch):
 
 
 def test_wide_concurrency_uses_async_fetcher_with_no_warning(monkeypatch):
-    """Re-expresses the old "falls back to serial when no async sibling
-    wired" intent for the async-only core: there is no async sibling to
-    wire and no serial fallback, so a wide ``API_USGS_CONCURRENT`` is
-    honored directly by the single async fetcher — every sub-request runs
-    on it and NO ``UserWarning`` is emitted (the env var is never silently
-    no-op'd, the previous regression that warning guarded)."""
-    import warnings
-
+    """A wide ``API_USGS_CONCURRENT`` is honored directly by the single
+    async fetcher: every sub-request fans out across it and NO
+    ``UserWarning`` is emitted."""
     calls = []
     monkeypatch.setenv("API_USGS_CONCURRENT", "16")
 
@@ -1430,20 +1397,20 @@ def test_wide_concurrency_uses_async_fetcher_with_no_warning(monkeypatch):
 def test_async_fan_out_runs_inside_running_event_loop(monkeypatch):
     """The parallel fan-out works even when the caller is already inside a
     running event loop (Jupyter / async apps): the anyio blocking portal
-    runs it in a worker thread, so it neither raises a nested
-    ``asyncio.run`` error nor silently degrades to the serial path."""
+    runs it in a worker thread, so it does not raise a nested
+    ``asyncio.run`` error."""
     monkeypatch.setenv("API_USGS_CONCURRENT", "16")
     async_calls = []
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
-    async def fetch(args):  # the single async fetcher — there is no sync sibling
+    async def fetch(args):  # the single async fetcher
         async_calls.append(tuple(args["sites"]))
         return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
 
     async def driver():  # call the sync getter from within a running loop
         # The sync wrapper drives the async core through the anyio portal in
-        # a worker thread, so it works even inside a running event loop —
-        # neither a nested-``asyncio.run`` error nor a silent serial fallback.
+        # a worker thread, so it works even inside a running event loop
+        # without raising a nested-``asyncio.run`` error.
         return fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
     df, _ = asyncio.run(driver())
@@ -1503,14 +1470,10 @@ def test_combine_chunk_responses_does_not_mutate_input_urls():
     'input responses are not mutated' invariant. The fix is to swap
     in a fresh ``httpx.Request`` rather than mutate the existing one.
     """
-    import httpx as _httpx
-
-    from dataretrieval.waterdata.chunking import _combine_chunk_responses
-
-    req1 = _httpx.Request("GET", "https://example.com/chunk0")
-    req2 = _httpx.Request("GET", "https://example.com/chunk1")
-    r1 = _httpx.Response(200, request=req1)
-    r2 = _httpx.Response(200, request=req2)
+    req1 = httpx.Request("GET", "https://example.com/chunk0")
+    req2 = httpx.Request("GET", "https://example.com/chunk1")
+    r1 = httpx.Response(200, request=req1)
+    r2 = httpx.Response(200, request=req2)
 
     out = _combine_chunk_responses(
         [r1, r2], canonical_url="https://canonical.example/full"
@@ -1630,12 +1593,11 @@ def test_retryable_skips_wrapped_midpagination_transient():
 
 # -- async driver (the single retry driver; sync facade drives it) ----------
 #
-# The chunker is async-only now, so the retry loop lives solely in
-# ``_retry``. These tests pin the same behavioral contracts the old
-# ``_retry_sync`` tests asserted (transient-then-success, exhausted-reraises,
-# non-retryable-not-retried, long-retry-after-escalates), re-expressed on the
-# async driver and run via ``asyncio.run``; the sleep is patched to a no-op so
-# backoff doesn't actually wait.
+# The retry loop lives in ``_retry``. These tests pin its behavioral
+# contracts (transient-then-success, exhausted-reraises,
+# non-retryable-not-retried, long-retry-after-escalates), run via
+# ``asyncio.run``; the sleep is patched to a no-op so backoff doesn't
+# actually wait.
 
 
 def test_retry_transient_then_recovers(monkeypatch):
@@ -1835,8 +1797,8 @@ def test_resume_finalizes_but_partials_stay_raw(monkeypatch):
         return frame.assign(finalized=True), ("METADATA", response)
 
     # Fail the 2nd issued sub-request once (the 1st completes, so partial
-    # state is non-empty), then succeed on resume. Conftest pins the serial,
-    # no-retry path, so the failure surfaces immediately.
+    # state is non-empty), then succeed on resume. Conftest pins a single
+    # connection and no retries, so the failure surfaces immediately.
     state = {"n": 0}
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)

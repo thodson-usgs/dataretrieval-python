@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 import pandas as pd
 import pytest
 
+from dataretrieval.waterdata import get_continuous
 from dataretrieval.waterdata.filters import (
     _check_numeric_filter_pitfall,
     _split_top_level_or,
@@ -152,8 +153,6 @@ def test_long_filter_fans_out_into_multiple_requests():
     sub-requests via the joint planner; every original clause is
     preserved across sub-requests; results concatenate to one row per
     sub-request given the one-row-per-chunk mock."""
-    from dataretrieval.waterdata import get_continuous
-
     expr = _filter_chunking_clauses()
     sent_filters: list[str] = []
 
@@ -191,8 +190,6 @@ def test_long_filter_fans_out_into_multiple_requests():
 def test_long_filter_deduplicates_cross_chunk_overlap():
     """Features returned by multiple sub-requests with the same ``id``
     are deduplicated in the concatenated result."""
-    from dataretrieval.waterdata import get_continuous
-
     expr = _filter_chunking_clauses()
     call_count = {"n": 0}
 
@@ -234,8 +231,6 @@ def test_empty_chunks_do_not_downgrade_geodataframe():
     import geopandas as gpd
     from shapely.geometry import Point
 
-    from dataretrieval.waterdata import get_continuous
-
     expr = _filter_chunking_clauses()
     call_count = {"n": 0}
 
@@ -276,8 +271,6 @@ def test_empty_chunks_do_not_downgrade_geodataframe():
 
 def test_cql_json_filter_is_not_chunked():
     """Chunking applies only to cql-text; cql-json is passed through unchanged."""
-    from dataretrieval.waterdata import get_continuous
-
     clause = "(time >= '2023-01-01T00:00:00Z' AND time <= '2023-01-01T00:30:00Z')"
     expr = " OR ".join([clause] * 300)
     sent_filters = []
@@ -433,8 +426,6 @@ def test_get_continuous_surfaces_pitfall_to_caller():
     """End-to-end: the check runs at the ``get_continuous`` boundary,
     not as a deep internal-only protection, so callers see the error
     before any HTTP traffic."""
-    from dataretrieval.waterdata import get_continuous
-
     with mock.patch("dataretrieval.waterdata.utils._construct_api_requests") as build:
         with pytest.raises(ValueError, match="lexicographic"):
             get_continuous(
