@@ -81,22 +81,13 @@ from .filters import (
 # leaves ~200 bytes for request-line framing and proxy variance.
 _WATERDATA_URL_BYTE_LIMIT = 8000
 
-# Default rule: any list-shaped kwarg with >1 element is chunked across
-# sub-requests — each chunk becomes a comma-joined sub-list in the URL.
-# The OGC getters expose ~90 such list-shaped params (IDs, codes,
-# statuses, ...), all chunkable, so it's shorter to enumerate the
-# exceptions than to maintain an allowlist that grows with the API.
-# Exceptions, by reason:
-#   - response shape: ``properties`` defines the columns; sharding
-#                      would yield different schemas per chunk.
-#   - structured:      ``bbox`` is a fixed 4-element coord tuple.
-#   - intervals:       date/time ranges are not enumerable sets.
-#   - handled elsewhere: ``filter`` becomes its own axis in
-#                         ``_extract_axes`` (joiner ``" OR "``);
-#                         comma-joining CQL clauses would emit
-#                         malformed expressions.
-#   - scalar by contract: ``limit``, ``skip_geometry``, ``filter_lang``
-#                          — a list value would be a type-erasure smuggle.
+# Any list-shaped kwarg with >1 element is chunked (comma-joined per
+# sub-list in the URL); ~90 OGC params qualify, so we denylist the few
+# exceptions rather than maintain a growing allowlist. Excluded because:
+# ``properties`` defines the column schema; ``bbox`` is a fixed coord
+# tuple; date/time params are intervals, not enumerable sets; ``filter``
+# is handled as its own OR-axis in ``_extract_axes``; and ``limit`` /
+# ``skip_geometry`` / ``filter_lang`` are scalar by contract.
 _NEVER_CHUNK = frozenset(
     {
         "properties",
@@ -118,12 +109,9 @@ _NEVER_CHUNK = frozenset(
 # Response header USGS uses to advertise remaining hourly quota.
 _QUOTA_HEADER = "x-ratelimit-remaining"
 
-# Environment variable that controls fan-out concurrency. Read at call
-# time (not import) so test patches via ``monkeypatch.setenv`` take
-# effect. The default (16) is the server-friendly sweet spot: higher
-# values trip the upstream into 5xx burst-protection in practice. Set to
-# ``1`` for a single connection, set to ``unbounded`` for no per-call cap
-# (use sparingly — you own the upstream-burst risk).
+# Fan-out concurrency cap, read at call time (not import) so test
+# ``monkeypatch.setenv`` applies. Value grammar in :func:`_read_concurrency_env`;
+# the concurrency model is in the module docstring.
 _CONCURRENCY_ENV = "API_USGS_CONCURRENT"
 _CONCURRENCY_DEFAULT = 16
 _CONCURRENCY_UNBOUNDED = "unbounded"
@@ -564,13 +552,10 @@ class ChunkInterrupted(RuntimeError):
         self.total_chunks = total_chunks
         self.call = call
         self.retry_after = retry_after
-        # Snapshot partial state at raise time so the exception's view
-        # stays stable across later ``call.resume()`` advances; the
-        # live view lives on ``call.partial_frame``/``.partial_response``.
-        # ``partial_frame`` gets a defensive ``.copy()`` because
-        # ``_combine_chunk_frames`` may return a chunk frame verbatim
-        # in the single-completed-chunk fast path; ``partial_response``
-        # already comes via ``copy.copy`` from ``_combine_chunk_responses``.
+        # Snapshot partial state at raise time so the exception's view stays
+        # stable across later ``call.resume()`` advances (the live view is on
+        # ``call.partial_frame`` / ``.partial_response``). ``.copy()`` guards
+        # the single-chunk fast path, where the frame may be returned verbatim.
         if call is None:
             self.partial_frame: pd.DataFrame = pd.DataFrame()
             self.partial_response: httpx.Response | None = None
@@ -1485,14 +1470,7 @@ class ChunkedCall:
 
     @property
     def completed_chunks(self) -> int:
-        """
-        Number of sub-requests completed so far.
-
-        Returns
-        -------
-        int
-            The count of completed sub-requests.
-        """
+        """Number of sub-requests completed so far."""
         return len(self._chunks)
 
     def _combine_raw(self) -> tuple[pd.DataFrame, httpx.Response]:
@@ -1760,21 +1738,13 @@ def multi_value_chunked(
     """
     Decorate an async fetcher to transparently chunk over-budget requests.
 
-    Splits multi-value list params and cql-text filters across
-    sub-requests so each fits the URL byte limit. Builds a
-    :class:`ChunkPlan` and runs it: passthrough requests are a trivial
-    single-step plan, so the decorated function has one code path
-    either way.
-
-    Decorates an ``async def fetch(args) -> (df, response)`` and returns a
-    callable that builds the :class:`ChunkPlan`, constructs a
-    :class:`ChunkedCall` over the fetcher, and drives it to completion via
-    :meth:`ChunkedCall.resume` (an ``anyio`` worker-thread portal, so it
-    works whether or not the caller is already inside an event loop —
-    Jupyter / IPython / async apps). Every pending sub-request is gathered
-    under one :class:`httpx.AsyncClient`; concurrency is bounded purely by
-    the connection pool, sized from ``API_USGS_CONCURRENT`` (``1`` is a
-    single-connection gather, ``plan.total <= 1`` a one-element gather).
+    Returns a callable that builds a :class:`ChunkPlan` from ``args``,
+    constructs a :class:`ChunkedCall` over the decorated
+    ``async def fetch(args) -> (df, response)``, and drives it to
+    completion via :meth:`ChunkedCall.resume`. The plan splits multi-value
+    list params and the cql-text filter so each sub-request URL fits the
+    byte limit; an already-fitting request is a one-step plan. See the
+    module docstring for the concurrency model.
 
     Parameters
     ----------
