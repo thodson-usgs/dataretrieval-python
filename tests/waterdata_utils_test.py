@@ -96,6 +96,99 @@ def test_walk_pages_multiple_mocked():
     assert mock_client.request.call_args[0][1] == "https://example.com/page2"
 
 
+def test_row_cap_truncates_and_stops_within_first_page():
+    # Regression for BUG 2: ``_row_cap`` bounds the TOTAL rows. A first page
+    # already over the cap is truncated to exactly ``max_rows`` and the
+    # ``next`` link is never followed.
+    from dataretrieval.waterdata.utils import _row_cap
+
+    resp1 = mock.MagicMock()
+    resp1.json.return_value = {
+        "numberReturned": 3,
+        "features": [{"id": str(i), "properties": {"val": i}} for i in range(3)],
+        "links": [{"rel": "next", "href": "https://example.com/page2"}],
+    }
+    resp1.headers = {}
+    resp1.status_code = 200
+    resp1.url = "https://example.com/page1"
+
+    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client.send.return_value = resp1
+
+    mock_req = mock.MagicMock(spec=httpx.Request)
+    mock_req.method = "GET"
+    mock_req.headers = {}
+    mock_req.url = "https://example.com/page1"
+
+    with _row_cap(2):
+        df, _ = _walk_pages(geopd=False, req=mock_req, client=mock_client)
+
+    assert len(df) == 2  # truncated to the cap, not the page's 3 rows
+    assert not mock_client.request.called  # ``next`` link never followed
+
+
+def test_row_cap_stops_across_pages():
+    # The cap accumulates across pages: page 1 (1 row) is under the cap so
+    # page 2 is fetched; once the cap (2) is met the third page is NOT.
+    from dataretrieval.waterdata.utils import _row_cap
+
+    def _page(idx, *, has_next):
+        resp = mock.MagicMock()
+        nxt = f"https://example.com/page{idx + 1}"
+        resp.json.return_value = {
+            "numberReturned": 1,
+            "features": [{"id": str(idx), "properties": {"val": idx}}],
+            "links": [{"rel": "next", "href": nxt}] if has_next else [],
+        }
+        resp.headers = {}
+        resp.status_code = 200
+        resp.url = f"https://example.com/page{idx}"
+        return resp
+
+    mock_client = mock.MagicMock(spec=httpx.Client)
+    mock_client.send.return_value = _page(1, has_next=True)
+    # page 2 still advertises a ``next`` (page 3) that must never be fetched.
+    mock_client.request.return_value = _page(2, has_next=True)
+
+    mock_req = mock.MagicMock(spec=httpx.Request)
+    mock_req.method = "GET"
+    mock_req.headers = {}
+    mock_req.url = "https://example.com/page1"
+
+    with _row_cap(2):
+        df, _ = _walk_pages(geopd=False, req=mock_req, client=mock_client)
+
+    assert len(df) == 2
+    assert mock_client.request.call_count == 1  # fetched page 2, stopped before 3
+
+
+def test_finalize_ogc_truncates_combined_to_max_rows():
+    # max_rows is enforced on the *combined* frame in _finalize_ogc (after
+    # dedup/sort), so it bounds the total exactly even when a chunked call's
+    # per-sub-request pages overshoot the per-_paginate early-stop.
+    import datetime
+
+    from dataretrieval.waterdata.utils import _finalize_ogc
+
+    frame = pd.DataFrame({"id": [str(i) for i in range(10)]})
+    resp = mock.MagicMock()
+    resp.url = "https://example.com/q"
+    resp.elapsed = datetime.timedelta(seconds=0.1)
+    resp.headers = {}
+
+    df, md = _finalize_ogc(
+        frame,
+        resp,
+        properties=None,
+        output_id="thing_id",
+        convert_type=False,
+        service="things",
+        max_rows=3,
+    )
+    assert len(df) == 3
+    assert hasattr(md, "url")  # wrapped as BaseMetadata
+
+
 def _resp_ok(features):
     """Build a 200-OK mock response carrying the given features list."""
     links = [{"rel": "next", "href": "https://example.com/page2"}] if features else []

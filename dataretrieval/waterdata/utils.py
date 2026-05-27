@@ -4,6 +4,7 @@ import copy
 import functools
 import json
 import logging
+import numbers
 import os
 import re
 from collections.abc import (
@@ -15,6 +16,7 @@ from collections.abc import (
     Mapping,
 )
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any, TypeVar, get_args
 from zoneinfo import ZoneInfo
@@ -905,6 +907,26 @@ def _aggregate_paginated_response(
 
 _Cursor = TypeVar("_Cursor")
 
+# Optional cap on the total rows a single paginated call accumulates before it
+# stops following ``next`` links. ``None`` (the default the data getters use)
+# means "no cap — fetch the whole series". Set via :func:`_row_cap` so the deep
+# ``_paginate`` loop can honor it without threading the value through the
+# generic chunker; this mirrors the ``_progress`` ambient-reporter pattern.
+_row_cap_var: ContextVar[int | None] = ContextVar("waterdata_row_cap", default=None)
+
+
+@contextmanager
+def _row_cap(max_rows: int | None) -> Iterator[None]:
+    """Cap the rows any :func:`_paginate` / :func:`_paginate_async` under this
+    context will accumulate (``None`` = uncapped). Used by
+    :func:`get_reference_table` to preview large tables without downloading
+    every page."""
+    token = _row_cap_var.set(max_rows)
+    try:
+        yield
+    finally:
+        _row_cap_var.reset(token)
+
 
 def _paginate(
     initial_req: httpx.Request,
@@ -988,18 +1010,24 @@ def _paginate(
             logger.warning("Initial response parse failed.")
             raise RuntimeError(_paginated_failure_message(0, e)) from e
         dfs = [df]
+        # Stop following ``next`` links once the optional row cap is reached
+        # (see :func:`_row_cap`); ``None`` means uncapped. The concatenation is
+        # sliced to the cap below so a final over-budget page can't exceed it.
+        cap = _row_cap_var.get()
+        nrows = len(df)
         if reporter is not None:
             reporter.set_rate_remaining(
                 resp.headers.get(_QUOTA_HEADER),
                 limit=resp.headers.get("x-ratelimit-limit"),
             )
             reporter.add_page(rows=len(df))
-        while cursor is not None:
+        while cursor is not None and (cap is None or nrows < cap):
             try:
                 resp = follow_up(cursor, client)
                 _raise_for_non_200(resp)
                 df, cursor = parse_response(resp)
                 dfs.append(df)
+                nrows += len(df)
                 total_elapsed += _safe_elapsed(resp)
                 if reporter is not None:
                     reporter.set_rate_remaining(
@@ -1021,7 +1049,10 @@ def _paginate(
         final_response = _aggregate_paginated_response(
             initial_response, resp, total_elapsed
         )
-        return pd.concat(dfs, ignore_index=True), final_response
+        result = pd.concat(dfs, ignore_index=True)
+        if cap is not None:
+            result = result.head(cap)
+        return result, final_response
 
 
 async def _paginate_async(
@@ -1037,7 +1068,7 @@ async def _paginate_async(
 
     Runs the same per-page loop but issues HTTP asynchronously so
     multiple sub-requests of a chunked call can run concurrently from
-    :func:`_fan_out_async`.
+    :meth:`~dataretrieval.waterdata.chunking.ChunkedCall.resume_async`.
     """
     logger.debug("Requesting: %s", initial_req.url)
     reporter = _progress.current()
@@ -1058,18 +1089,24 @@ async def _paginate_async(
             logger.warning("Initial response parse failed.")
             raise RuntimeError(_paginated_failure_message(0, e)) from e
         dfs = [df]
+        # Stop following ``next`` links once the optional row cap is reached
+        # (see :func:`_row_cap`); ``None`` means uncapped. Mirrors the sync
+        # :func:`_paginate`; the concatenation is sliced to the cap below.
+        cap = _row_cap_var.get()
+        nrows = len(df)
         if reporter is not None:
             reporter.set_rate_remaining(
                 resp.headers.get(_QUOTA_HEADER),
                 limit=resp.headers.get("x-ratelimit-limit"),
             )
             reporter.add_page(rows=len(df))
-        while cursor is not None:
+        while cursor is not None and (cap is None or nrows < cap):
             try:
                 resp = await follow_up(cursor, sess)
                 _raise_for_non_200(resp)
                 df, cursor = parse_response(resp)
                 dfs.append(df)
+                nrows += len(df)
                 total_elapsed += _safe_elapsed(resp)
                 if reporter is not None:
                     reporter.set_rate_remaining(
@@ -1091,7 +1128,10 @@ async def _paginate_async(
         final_response = _aggregate_paginated_response(
             initial_response, resp, total_elapsed
         )
-        return pd.concat(dfs, ignore_index=True), final_response
+        result = pd.concat(dfs, ignore_index=True)
+        if cap is not None:
+            result = result.head(cap)
+        return result, final_response
 
 
 def _ogc_parse_response(
@@ -1356,8 +1396,50 @@ def _sort_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _finalize_ogc(
+    frame: pd.DataFrame,
+    response: httpx.Response,
+    *,
+    properties: list[str] | None,
+    output_id: str,
+    convert_type: bool,
+    service: str,
+    max_rows: int | None = None,
+) -> tuple[pd.DataFrame, BaseMetadata]:
+    """Shape a combined OGC result into the user-facing ``(df, md)``.
+
+    The single home for the OGC getters' result shaping: empties
+    normalized, types coerced (when ``convert_type``), the wire ``id``
+    renamed and columns ordered, rows sorted, optionally truncated to
+    ``max_rows``, and the response wrapped as
+    :class:`~dataretrieval.utils.BaseMetadata`.
+
+    Injected into the chunker as its ``finalize`` hook (see
+    :data:`~dataretrieval.waterdata.chunking._Finalize`) so the
+    un-interrupted return *and* a resumed ``ChunkInterrupted.call.resume()``
+    produce the same shape — closing the gap where resume used to hand back
+    the chunker's raw frame and bare ``httpx.Response``.
+
+    ``max_rows`` is applied here (after dedup/sort, on the *combined* frame)
+    rather than only per-sub-request, so a chunked call's total is bounded
+    to exactly ``max_rows`` and a resumed call honors the cap too — the
+    per-``_paginate`` ``_row_cap`` is only an early-stop download bound.
+    """
+    frame = _deal_with_empty(frame, properties, service)
+    if convert_type:
+        frame = _type_cols(frame)
+    frame = _arrange_cols(frame, properties, output_id)
+    frame = _sort_rows(frame)
+    if max_rows is not None:
+        frame = frame.head(max_rows)
+    return frame, BaseMetadata(response)
+
+
 def get_ogc_data(
-    args: dict[str, Any], output_id: str, service: str
+    args: dict[str, Any],
+    output_id: str,
+    service: str,
+    max_rows: int | None = None,
 ) -> tuple[pd.DataFrame, BaseMetadata]:
     """
     Retrieves OGC (Open Geospatial Consortium) data from a specified
@@ -1376,6 +1458,11 @@ def get_ogc_data(
     service : str
         The OGC API collection name (e.g., ``"daily"``,
         ``"monitoring-locations"``, ``"continuous"``).
+    max_rows : int, optional
+        Stop paginating once this many rows have been collected and
+        truncate the result to exactly ``max_rows``. ``None`` (default)
+        fetches the full result. Intended for cheap previews of large,
+        un-chunked tables (e.g. :func:`get_reference_table`).
 
     Returns
     -------
@@ -1390,6 +1477,19 @@ def get_ogc_data(
     - Handles optional arguments such as `convert_type`.
     - Applies column cleanup and reordering based on service and properties.
     """
+    # Enforce a genuine positive integer: a float (even ``10.0``) or ``bool``
+    # would pass a bare ``< 1`` check and then crash deep in
+    # ``pd.DataFrame.head`` with an opaque ``TypeError`` after HTTP I/O has
+    # already fired. ``numbers.Integral`` (not ``int``) so numpy integers —
+    # e.g. ``max_rows`` derived from a numpy/pandas computation — are accepted;
+    # ``bool`` is an ``Integral`` subtype, so exclude it explicitly.
+    if max_rows is not None and (
+        not isinstance(max_rows, numbers.Integral)
+        or isinstance(max_rows, bool)
+        or max_rows < 1
+    ):
+        raise ValueError(f"max_rows must be a positive integer (got {max_rows!r}).")
+
     args = args.copy()
     args["service"] = service
     args = _switch_arg_id(args, id_name=output_id, service=service)
@@ -1402,15 +1502,23 @@ def get_ogc_data(
     convert_type = args.pop("convert_type", False)
     args = {k: v for k, v in args.items() if v is not None}
 
-    with _progress.progress_context(service=service):
-        return_list, response = _fetch_once(args)
-    return_list = _deal_with_empty(return_list, properties, service)
-    if convert_type:
-        return_list = _type_cols(return_list)
-    return_list = _arrange_cols(return_list, properties, output_id)
-    return_list = _sort_rows(return_list)
-
-    return return_list, BaseMetadata(response)
+    # Post-processing is injected into the chunker rather than applied here,
+    # so it runs on *every* exit: the normal return AND a later
+    # ``exc.call.resume()`` after a ChunkInterrupted (which never re-enters
+    # this function). ``_finalize_ogc`` is the single source of result shape;
+    # it also applies ``max_rows`` to the *combined* frame so the cap is the
+    # exact total even when the plan chunks or the call is resumed, while
+    # ``_row_cap`` below only early-stops each sub-request's pagination.
+    finalize = functools.partial(
+        _finalize_ogc,
+        properties=properties,
+        output_id=output_id,
+        convert_type=convert_type,
+        service=service,
+        max_rows=max_rows,
+    )
+    with _progress.progress_context(service=service), _row_cap(max_rows):
+        return _fetch_once(args, finalize=finalize)
 
 
 async def _fetch_once_async(

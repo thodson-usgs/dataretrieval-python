@@ -105,6 +105,16 @@ def test_note_retry_is_noop_when_disabled():
     assert stream.getvalue() == ""
 
 
+def test_note_retry_accepts_integer_wait():
+    # An int ``wait`` (e.g. whole seconds) must render without raising:
+    # ``round(int, 1)`` returns an int and ``int.is_integer()`` only exists
+    # on Python 3.12+, while the package floor is 3.9. Renders like the float.
+    stream = io.StringIO()
+    reporter = ProgressReporter(stream=stream, enabled=True)
+    reporter.note_retry(attempt=1, wait=5)
+    assert "retrying (attempt 1, waiting 5s)" in stream.getvalue()
+
+
 def test_chunk_segment_only_shown_when_multiple_chunks():
     single = io.StringIO()
     reporter = ProgressReporter(stream=single, enabled=True)
@@ -482,7 +492,7 @@ def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
 
     import pandas as pd
 
-    from dataretrieval.waterdata.chunking import ChunkPlan, _fan_out_async
+    from dataretrieval.waterdata.chunking import ChunkedCall, ChunkPlan
 
     # Fake build_request whose URL length scales with the sites list,
     # mirroring the planner's _request_bytes contract. _FakeReq has the
@@ -514,7 +524,9 @@ def test_fan_out_async_sets_chunks_on_active_reporter(monkeypatch):
 
     async def run():
         with progress_context(service="daily", stream=stream, enabled=True) as rep:
-            await _fan_out_async(plan, fetch_once, fetch_async, max_concurrent=4)
+            await ChunkedCall(plan, fetch_once).resume_async(
+                fetch_async, max_concurrent=4
+            )
             return rep.total_chunks, rep.current_chunk
 
     total_recorded, current_recorded = asyncio.run(run())

@@ -16,6 +16,7 @@ and then fail in production.
 """
 
 import asyncio
+import concurrent.futures
 import datetime
 import sys
 from unittest import mock
@@ -1214,8 +1215,8 @@ def test_iter_sub_args_passthrough_yields_a_copy():
 # for the whole suite. Each test below overrides it so the wrapper takes
 # the parallel branch. The decorator's ``fetch_async`` accepts any
 # coroutine returning ``(df, response)`` — no real ``httpx.AsyncClient``
-# round-trip occurs, even though :func:`_fan_out_async` opens one for
-# pool management.
+# round-trip occurs, even though :meth:`ChunkedCall.resume_async` opens one
+# for pool management.
 
 
 def _async_chunked_fetch(monkeypatch, fetch_async, *, max_concurrent=16):
@@ -1327,56 +1328,88 @@ def test_async_fan_out_failure_yields_resumable_call(monkeypatch):
     assert len(df) == interrupted.total_chunks
 
 
-@pytest.mark.parametrize(
-    "fallback_trigger,warning_match",
-    [
-        pytest.param("running_loop", "running asyncio event loop", id="running-loop"),
-        pytest.param("no_fetch_async", "no async fetch sibling", id="missing-async"),
-    ],
-)
-def test_async_falls_back_to_serial_with_warning(
-    monkeypatch, fallback_trigger, warning_match
-):
-    """The parallel path falls back to the serial ``ChunkedCall``
-    (with a ``UserWarning``) in two situations:
+def test_async_fan_out_resume_applies_finalize(monkeypatch):
+    """The ``finalize`` injected for a PARALLEL call survives the interruption
+    (carried on the ``ChunkedCall`` through the anyio portal), so a serial
+    ``exc.call.resume()`` still returns the finalized shape — guarding the
+    parallel resume_async -> resume -> finalize path the serial-pinned finalize
+    test can't reach. Partials stay raw (no finalize in the exception ctor)."""
 
-    * a running asyncio event loop (Jupyter / IPython kernels, async
-      apps) — ``asyncio.run`` would otherwise raise ``RuntimeError``;
-    * the decorator wasn't wired with a ``fetch_async=`` sibling —
-      ``API_USGS_CONCURRENT`` would otherwise be a silent no-op.
-    """
+    def finalize(frame, response):
+        return frame.assign(finalized=True), ("MD", response)
+
+    call_count = {"async": 0}
+
+    async def fetch_async(args):
+        call_count["async"] += 1
+        if call_count["async"] == 1:
+            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+        raise ServiceUnavailable("503: simulated")
+
+    monkeypatch.setenv("API_USGS_CONCURRENT", "16")
+
+    @multi_value_chunked(
+        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
+    )
+    def fetch(args):
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=99)
+
+    sites = ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]
+    with pytest.raises(ServiceInterrupted) as exc_info:
+        fetch({"sites": sites}, finalize=finalize)
+
+    # Partial snapshot stays raw — building the exception must not finalize.
+    assert "finalized" not in exc_info.value.partial_frame.columns
+    # Resume applies the finalize carried on the ChunkedCall.
+    df, md = exc_info.value.call.resume()
+    assert "finalized" in df.columns
+    assert md[0] == "MD"
+
+
+def test_async_falls_back_to_serial_when_no_fetch_async(monkeypatch):
+    """With no ``fetch_async=`` sibling wired, a parallel
+    ``API_USGS_CONCURRENT`` can't be honored, so the call falls back to
+    the serial ``ChunkedCall`` path with a one-time ``UserWarning``
+    rather than silently no-op'ing the env var."""
     sync_calls = []
     monkeypatch.setenv("API_USGS_CONCURRENT", "16")
 
-    if fallback_trigger == "running_loop":
+    @multi_value_chunked(build_request=_fake_build, url_limit=240)
+    def fetch(args):
+        sync_calls.append(tuple(args["sites"]))
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
 
-        async def fetch_async(args):
-            raise AssertionError("parallel path must not run inside an active loop")
-
-        @multi_value_chunked(
-            build_request=_fake_build, fetch_async=fetch_async, url_limit=240
-        )
-        def fetch(args):
-            sync_calls.append(tuple(args["sites"]))
-            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
-
-        async def driver():
-            with pytest.warns(UserWarning, match=warning_match):
-                return fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
-
-        df, _ = asyncio.run(driver())
-    else:
-
-        @multi_value_chunked(build_request=_fake_build, url_limit=240)
-        def fetch(args):
-            sync_calls.append(tuple(args["sites"]))
-            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
-
-        with pytest.warns(UserWarning, match=warning_match):
-            df, _ = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+    with pytest.warns(UserWarning, match="no async fetch sibling"):
+        df, _ = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
     assert len(sync_calls) > 1
     assert len(df) == len(sync_calls)
+
+
+def test_async_fan_out_runs_inside_running_event_loop(monkeypatch):
+    """The parallel fan-out works even when the caller is already inside a
+    running event loop (Jupyter / async apps): the anyio blocking portal
+    runs it in a worker thread, so it neither raises a nested
+    ``asyncio.run`` error nor silently degrades to the serial path."""
+    monkeypatch.setenv("API_USGS_CONCURRENT", "16")
+    async_calls = []
+
+    async def fetch_async(args):
+        async_calls.append(tuple(args["sites"]))
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
+
+    @multi_value_chunked(
+        build_request=_fake_build, fetch_async=fetch_async, url_limit=240
+    )
+    def fetch(args):  # sync sibling must NOT run — the async path handles it
+        raise AssertionError("serial fallback must not run inside a live loop")
+
+    async def driver():  # call the sync getter from within a running loop
+        return fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+
+    df, _ = asyncio.run(driver())
+    assert len(async_calls) > 1  # every sub-request ran on the async path
+    assert len(df) == len(async_calls)
 
 
 def test_async_fan_out_cancellation_wins_over_transient_sibling(monkeypatch):
@@ -1387,11 +1420,16 @@ def test_async_fan_out_cancellation_wins_over_transient_sibling(monkeypatch):
     signal — letting a transient-classification path consume it
     would silently swallow the user's stop request.
 
-    fetch_async has no ``await`` inside its body, so gather schedules
+    ``fetch_async`` has no ``await`` in its body, so the gather schedules
     the tasks in submission order and each runs synchronously to its
-    raise — making ``call_count`` deterministic for this test:
-    1 = probe, 2 = first fan-out task (transient), 3 = second
-    fan-out task (cancellation).
+    raise — making ``call_count`` deterministic: 1 = first chunk
+    (success), 2 = second chunk (transient), 3 = third chunk (cancel).
+
+    Through the sync→async blocking portal an in-flight cancellation
+    surfaces to the caller as ``concurrent.futures.CancelledError`` (the
+    thread-boundary cancellation type) rather than ``asyncio.CancelledError``
+    — either way it propagates unmodified rather than being swallowed and
+    wrapped as a resumable ``ChunkInterrupted``.
     """
     call_count = {"async": 0}
 
@@ -1412,7 +1450,7 @@ def test_async_fan_out_cancellation_wins_over_transient_sibling(monkeypatch):
     # transient (call 2) AND the cancellation (call 3).
     sites = [f"S{i}" * 10 for i in range(1, 9)]
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises((asyncio.CancelledError, concurrent.futures.CancelledError)):
         fetch({"sites": sites})
 
 
@@ -1714,3 +1752,57 @@ def test_async_fan_out_surfaces_fatal_over_transient(monkeypatch):
     fetch = _async_chunked_fetch(monkeypatch, fetch_async)
     with pytest.raises(ValueError, match="deterministic bug"):
         fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+
+
+# --- finalize hook (resume finalizes; partials stay raw) -------------------
+#
+# Regression for the bug where ``exc.call.resume()`` returned the chunker's
+# raw ``(frame, httpx.Response)`` instead of the post-processed shape a normal
+# getter call yields. The fix injects a ``finalize`` transform applied at the
+# terminal resume()/resume_async() returns. The partial_* accessors stay RAW
+# so building/inspecting a ChunkInterrupted never triggers finalize's side
+# effects (for OGC, _deal_with_empty issues a schema network GET on an empty
+# frame — that must NOT fire inside the exception constructor).
+
+
+def test_resume_finalizes_but_partials_stay_raw(monkeypatch):
+    """resume() applies the injected ``finalize``; ``partial_frame`` /
+    ``partial_response`` are the raw snapshot, and constructing the
+    ``ChunkInterrupted`` must not invoke ``finalize`` at all (no side effects
+    such as a schema fetch in the exception ctor)."""
+    calls = {"finalize": 0}
+
+    def finalize(frame, response):
+        # Stand in for the OGC pipeline: mark the frame and wrap the response.
+        calls["finalize"] += 1
+        return frame.assign(finalized=True), ("METADATA", response)
+
+    # Fail the 2nd issued sub-request once (the 1st completes, so partial
+    # state is non-empty), then succeed on resume. Conftest pins the serial,
+    # no-retry path, so the failure surfaces immediately.
+    state = {"n": 0}
+
+    @multi_value_chunked(build_request=_fake_build, url_limit=240)
+    def fetch(args):
+        state["n"] += 1
+        if state["n"] == 2:
+            raise ServiceUnavailable("503: simulated")
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response()
+
+    sites = ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]
+    with pytest.raises(ServiceInterrupted) as exc_info:
+        fetch({"sites": sites}, finalize=finalize)
+
+    interrupted = exc_info.value
+    assert interrupted.completed_chunks >= 1
+    # Building the exception did NOT run finalize — no network/side effects.
+    assert calls["finalize"] == 0
+    # Partial snapshot is the RAW combined frame/response (not finalized).
+    assert "finalized" not in interrupted.partial_frame.columns
+    assert not isinstance(interrupted.partial_response, tuple)
+
+    # Resume DOES finalize and yields the same shape a normal call would.
+    df, md = interrupted.call.resume()
+    assert "finalized" in df.columns
+    assert md[0] == "METADATA"
+    assert calls["finalize"] >= 1

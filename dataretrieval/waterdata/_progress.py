@@ -162,7 +162,9 @@ class ProgressReporter:
         """
         # Keep sub-second waits explicit (avoid misleading ``0s``) while
         # rendering whole-second waits without unnecessary ``.0`` noise.
-        wait_1dp = round(wait, 1)
+        # ``float()`` to support Python 3.9-3.11: ``round(int, 1)`` returns an
+        # int and ``int.is_integer()`` (used below) only exists on 3.12+.
+        wait_1dp = round(float(wait), 1)
         if wait_1dp < 1 or not wait_1dp.is_integer():
             secs = f"{wait_1dp:.1f}s"
         else:
