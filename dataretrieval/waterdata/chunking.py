@@ -62,7 +62,7 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 from urllib.parse import quote_plus
 
 import httpx
@@ -166,13 +166,14 @@ def _read_concurrency_env() -> int | None:
     return value
 
 
-# Retry-with-backoff for transient sub-request failures (429 / 5xx /
-# connect-read timeouts). The env var is read at call time so test
-# ``monkeypatch.setenv`` takes effect; the timing constants are
-# module-level so power users (and tests) can ``monkeypatch.setattr``
-# them. Defaults: 4 retries, 0.5s base doubling under full jitter up to
-# a 30s per-attempt ceiling, and honor a server ``Retry-After`` up to
-# 60s before escalating to a resumable interruption instead.
+# Retry-with-backoff defaults for transient sub-request failures (429 /
+# 5xx / connect-read timeouts). All four are resolved at call time by
+# ``RetryPolicy.from_env`` (the env var via ``monkeypatch.setenv``, the
+# timing constants via ``monkeypatch.setattr`` on this module), so both
+# are overridable in tests and by power users. Defaults: 4 retries, 0.5s
+# base doubling under full jitter up to a 30s per-attempt ceiling, and
+# honor a server ``Retry-After`` up to 60s before escalating to a
+# resumable interruption instead.
 _RETRIES_ENV = "API_USGS_RETRIES"
 _RETRIES_DEFAULT = 4
 _RETRY_BASE_BACKOFF = 0.5
@@ -237,10 +238,31 @@ class RetryPolicy:
     max_backoff: float = _RETRY_MAX_BACKOFF
     retry_after_cap: float = _RETRY_AFTER_CAP
 
+    def __post_init__(self) -> None:
+        # Guard the value object's own invariants so a misconfiguration
+        # fails loudly at construction rather than as a downstream
+        # ``time.sleep`` ValueError (negative delay) or a silent
+        # asyncio.sleep-treats-negative-as-zero divergence.
+        if self.max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0 (got {self.max_retries}).")
+        if self.base_backoff < 0 or self.max_backoff < 0 or self.retry_after_cap < 0:
+            raise ValueError("retry backoff settings must be non-negative.")
+
     @classmethod
     def from_env(cls) -> RetryPolicy:
-        """Build a policy, resolving ``max_retries`` from ``API_USGS_RETRIES``."""
-        return cls(max_retries=_read_retries_env())
+        """Build a policy from the module-level defaults, resolved now.
+
+        ``max_retries`` comes from ``API_USGS_RETRIES``; the timing knobs
+        are read from the ``_RETRY_*`` module constants at call time (not
+        the dataclass field defaults, which freeze at class definition) so
+        ``monkeypatch.setattr`` on those constants takes effect.
+        """
+        return cls(
+            max_retries=_read_retries_env(),
+            base_backoff=_RETRY_BASE_BACKOFF,
+            max_backoff=_RETRY_MAX_BACKOFF,
+            retry_after_cap=_RETRY_AFTER_CAP,
+        )
 
     def should_retry(self, attempt: int, retry_after: float | None) -> bool:
         """Whether a just-failed ``attempt`` (1-based) warrants another try.
@@ -276,42 +298,36 @@ _chunked_client: ContextVar[httpx.Client | None] = ContextVar(
     "_chunked_client", default=None
 )
 
-# Async sibling of ``_chunked_client``. Published by
-# ``_publish_async_client`` during ``_fan_out_async`` so async
-# paginated-loop helpers reuse one ``httpx.AsyncClient`` (and its
-# connection pool) across every concurrent sub-request of a single
-# chunked call.
+# Async sibling of ``_chunked_client``. Published (via :func:`_publish`)
+# during ``_fan_out_async`` so async paginated-loop helpers reuse one
+# ``httpx.AsyncClient`` (and its connection pool) across every concurrent
+# sub-request of a single chunked call.
 _chunked_async_client: ContextVar[httpx.AsyncClient | None] = ContextVar(
     "_chunked_async_client", default=None
 )
 
-
-@contextmanager
-def _publish_client(client: httpx.Client) -> Iterator[None]:
-    """
-    Make ``client`` visible to :func:`get_active_client` for the
-    duration of the ``with`` block via the ``_chunked_client``
-    ContextVar. Wraps the set/reset token dance so callers don't have to.
-    """
-    token = _chunked_client.set(client)
-    try:
-        yield
-    finally:
-        _chunked_client.reset(token)
+_ClientT = TypeVar("_ClientT")
 
 
 @contextmanager
-def _publish_async_client(client: httpx.AsyncClient) -> Iterator[None]:
+def _publish(var: ContextVar[_ClientT | None], client: _ClientT) -> Iterator[None]:
     """
-    Make ``client`` visible to :func:`get_active_async_client` for the
-    duration of the ``with`` block. Async sibling of
-    :func:`_publish_client`.
+    Bind ``client`` to the ContextVar ``var`` for the duration of the
+    ``with`` block (wrapping the set/reset token dance), so paginated-loop
+    helpers can borrow the chunker's shared client via
+    :func:`get_active_client` / :func:`get_active_async_client`.
+
+    Generic over the client type so the sync (:class:`httpx.Client` via
+    ``_chunked_client``) and async (:class:`httpx.AsyncClient` via
+    ``_chunked_async_client``) paths share one implementation, while the
+    ``_ClientT`` type var still lets a type checker reject a var/client
+    type mismatch.
     """
-    token = _chunked_async_client.set(client)
+    token = var.set(client)
     try:
         yield
     finally:
-        _chunked_async_client.reset(token)
+        var.reset(token)
 
 
 def get_active_client() -> httpx.Client | None:
@@ -325,8 +341,8 @@ def get_active_client() -> httpx.Client | None:
     Returns
     -------
     httpx.Client or None
-        The client published by :func:`_publish_client` if currently
-        inside a :class:`ChunkedCall` ``resume`` block; ``None`` otherwise.
+        The client published via :func:`_publish` if currently inside a
+        :class:`ChunkedCall` ``resume`` block; ``None`` otherwise.
     """
     return _chunked_client.get()
 
@@ -1069,13 +1085,18 @@ def _retryable(exc: BaseException) -> tuple[bool, float | None]:
     """
     Decide whether ``exc`` is a transient worth an automatic retry.
 
-    Narrower than :func:`_classify_chunk_error`: it retries rate limits
-    (429), service errors (5xx), and genuine transport transients
-    (:class:`httpx.TransportError` — ``ConnectError``, ``ReadTimeout``, …)
-    but NOT :class:`httpx.InvalidURL` (a too-long server cursor URL won't
-    fix on retry, though it stays *resumable*). Walks the ``__cause__``
-    chain because ``_walk_pages`` re-wraps mid-pagination failures as
-    ``RuntimeError``.
+    Inspects only the *top-level* exception, by design — and so is
+    deliberately narrower than :func:`_classify_chunk_error`, which walks
+    the ``__cause__`` chain for resumability. ``_paginate`` raises an
+    initial-request transient (429 / 5xx / :class:`httpx.TransportError`
+    such as ``ConnectError`` / ``ReadTimeout``) *raw*, but re-wraps any
+    mid-pagination failure as a ``RuntimeError``. Retrying only the raw,
+    top-level transient means we re-issue a sub-request that made no
+    progress (cheap), while a failure after partial pagination escalates
+    to the resumable :class:`ChunkInterrupted` instead of being re-walked
+    from page 1 — which would re-spend the very quota that was exhausted.
+    ``httpx.InvalidURL`` is excluded (a too-long cursor won't fix on
+    retry), and it only ever arises on a follow-up page anyway.
 
     Returns
     -------
@@ -1083,13 +1104,10 @@ def _retryable(exc: BaseException) -> tuple[bool, float | None]:
         ``(retryable, retry_after)`` — the server ``Retry-After`` hint
         (seconds) when the transient carried one, else ``None``.
     """
-    cur: BaseException | None = exc
-    while cur is not None:
-        if isinstance(cur, (RateLimited, ServiceUnavailable)):
-            return True, cur.retry_after
-        if isinstance(cur, httpx.TransportError):
-            return True, None
-        cur = cur.__cause__
+    if isinstance(exc, (RateLimited, ServiceUnavailable)):
+        return True, exc.retry_after
+    if isinstance(exc, httpx.TransportError):
+        return True, None
     return False, None
 
 
@@ -1334,6 +1352,10 @@ class ChunkedCall:
         # subsequent ``resume()`` only re-issues the missing indices.
         # On the serial path this fills contiguously from 0.
         self._chunks: dict[int, tuple[pd.DataFrame, httpx.Response]] = {}
+        # Explicit completion order for response-header aggregation.
+        # Keeping this separate from ``_chunks`` avoids coupling that
+        # behavior to dict insertion semantics or future write patterns.
+        self._completion_order: list[int] = []
 
     def record(self, index: int, pair: tuple[pd.DataFrame, httpx.Response]) -> None:
         """Record a completed sub-request's ``(frame, response)`` pair
@@ -1341,6 +1363,8 @@ class ChunkedCall:
         :meth:`resume` and the parallel fan-out in
         :func:`_fan_out_async` so the completion set stays
         encapsulated."""
+        if index not in self._chunks:
+            self._completion_order.append(index)
         self._chunks[index] = pair
 
     def wrap_failure(self, exc: BaseException) -> ChunkInterrupted | None:
@@ -1368,6 +1392,27 @@ class ChunkedCall:
 
     def _ordered_chunks(self) -> list[tuple[pd.DataFrame, httpx.Response]]:
         return [self._chunks[i] for i in sorted(self._chunks)]
+
+    def _responses_by_completion(self) -> list[httpx.Response]:
+        # The final element is the most-recently completed sub-request, whose
+        # headers carry the freshest ``x-ratelimit-remaining`` for aggregation.
+        return [self._chunks[i][1] for i in self._completion_order]
+
+    def combined(self) -> tuple[pd.DataFrame, httpx.Response]:
+        """Combine every recorded sub-request into one ``(frame, response)``.
+
+        Frames concatenate in sub-args *index* order (deterministic,
+        independent of parallel completion order); the aggregated response
+        takes its headers from the most-recently-*completed* sub-request, so
+        a fan-out that finished chunks out of index order still surfaces the
+        latest rate-limit state the server reported rather than a stale one.
+        """
+        return (
+            _combine_chunk_frames([frame for frame, _ in self._ordered_chunks()]),
+            _combine_chunk_responses(
+                self._responses_by_completion(), self.plan.canonical_url
+            ),
+        )
 
     @property
     def partial_frame(self) -> pd.DataFrame:
@@ -1405,7 +1450,7 @@ class ChunkedCall:
         if not self._chunks:
             return None
         return _combine_chunk_responses(
-            [resp for _, resp in self._ordered_chunks()], self.plan.canonical_url
+            self._responses_by_completion(), self.plan.canonical_url
         )
 
     def resume(self) -> tuple[pd.DataFrame, httpx.Response]:
@@ -1443,23 +1488,18 @@ class ChunkedCall:
             is on ``exc.call`` — wait for the underlying condition to
             clear and call ``exc.call.resume()`` again.
         """
-        with httpx.Client(**HTTPX_DEFAULTS) as client, _publish_client(client):
-            reporter = _progress.current()
-            if reporter is not None:
-                reporter.set_chunks(self.plan.total)
-            for i, sub_args in enumerate(self.plan.iter_sub_args()):
-                if i in self._chunks:
-                    continue
+        with httpx.Client(**HTTPX_DEFAULTS) as client:
+            with _publish(_chunked_client, client):
+                reporter = _progress.current()
                 if reporter is not None:
-                    reporter.start_chunk(i + 1)
-                self._issue(i, sub_args)
-            ordered = self._ordered_chunks()
-            frames = [frame for frame, _ in ordered]
-            responses = [resp for _, resp in ordered]
-            return (
-                _combine_chunk_frames(frames),
-                _combine_chunk_responses(responses, self.plan.canonical_url),
-            )
+                    reporter.set_chunks(self.plan.total)
+                for i, sub_args in enumerate(self.plan.iter_sub_args()):
+                    if i in self._chunks:
+                        continue
+                    if reporter is not None:
+                        reporter.start_chunk(i + 1)
+                    self._issue(i, sub_args)
+                return self.combined()
 
     def _issue(self, index: int, sub_args: dict[str, Any]) -> None:
         """
@@ -1556,13 +1596,17 @@ async def _fan_out_async(
     limits = httpx.Limits(
         max_connections=max_concurrent, max_keepalive_connections=max_concurrent
     )
-    # ``sys.maxsize`` stands in for "unbounded": ``asyncio.Semaphore``
-    # only decrements a counter, never preallocates slots.
-    semaphore = asyncio.Semaphore(max_concurrent or sys.maxsize)
+    # ``None`` means "unbounded"; ``sys.maxsize`` stands in for it since
+    # ``asyncio.Semaphore`` only decrements a counter, never preallocates
+    # slots. Test ``is None`` explicitly so a stray ``0`` isn't silently
+    # promoted to unbounded by a falsy-``or``.
+    semaphore = asyncio.Semaphore(
+        sys.maxsize if max_concurrent is None else max_concurrent
+    )
     call = ChunkedCall(plan, fetch_once, retry_policy)
 
     async with httpx.AsyncClient(limits=limits, **HTTPX_DEFAULTS) as client:
-        with _publish_async_client(client):
+        with _publish(_chunked_async_client, client):
             reporter = _progress.current()
             if reporter is not None:
                 reporter.set_chunks(plan.total)
@@ -1586,15 +1630,16 @@ async def _fan_out_async(
             # Dispatch every sub-request concurrently. ``return_exceptions``
             # keeps completed pairs after a sibling fails, so partial state
             # stays recoverable via ``ChunkedCall.resume()``. Failure
-            # precedence:
+            # precedence, in order:
             #   1. Cancellation / interrupt signals (CancelledError,
             #      KeyboardInterrupt, SystemExit — non-Exception) propagate
             #      unmodified; wrapping them as a transient would swallow the
             #      user's stop signal.
-            #   2. Recognized transients wrap as ChunkInterrupted so the user
-            #      gets a resumable handle even when a non-transient failure
-            #      landed earlier in submission order.
-            #   3. Otherwise re-raise the first failure, preserving its type.
+            #   2. A non-transient failure (a real bug — unrecognized by
+            #      ``wrap_failure``) surfaces raw, so it isn't masked behind a
+            #      resumable handle for a transient sibling that landed later.
+            #   3. Only when every failure is a recognized transient do we
+            #      raise the first as a resumable ``ChunkInterrupted``.
             results = await asyncio.gather(
                 *(track(i, args) for i, args in enumerate(sub_args_list)),
                 return_exceptions=True,
@@ -1603,17 +1648,18 @@ async def _fan_out_async(
             for exc in failures:
                 if not isinstance(exc, Exception):
                     raise exc
+            first_transient: tuple[ChunkInterrupted, BaseException] | None = None
             for exc in failures:
-                if (interrupted := call.wrap_failure(exc)) is not None:
-                    raise interrupted from exc
-            if failures:
-                raise failures[0]
+                interrupted = call.wrap_failure(exc)
+                if interrupted is None:
+                    raise exc
+                if first_transient is None:
+                    first_transient = (interrupted, exc)
+            if first_transient is not None:
+                interrupted, exc = first_transient
+                raise interrupted from exc
 
-    ordered = call._ordered_chunks()
-    return (
-        _combine_chunk_frames([df for df, _ in ordered]),
-        _combine_chunk_responses([resp for _, resp in ordered], plan.canonical_url),
-    )
+    return call.combined()
 
 
 def multi_value_chunked(

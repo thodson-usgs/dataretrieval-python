@@ -78,6 +78,26 @@ def test_note_retry_renders_then_clears_on_next_page():
     assert "retrying" not in stream.getvalue().rsplit("\r", 1)[-1]
 
 
+def test_note_retry_subsecond_wait_shows_decimal():
+    # A sub-second backoff must not collapse to a misleading "0s".
+    stream = io.StringIO()
+    reporter = ProgressReporter(stream=stream, enabled=True)
+    reporter.note_retry(attempt=1, wait=0.3)
+    out = stream.getvalue()
+    assert "waiting 0.3s" in out and "waiting 0s" not in out
+
+
+def test_note_retry_cleared_on_close():
+    # An exhausted retry leaves retry_note set with no following page;
+    # close() must clear it so the persisted last line isn't a stale note.
+    stream = io.StringIO()
+    reporter = ProgressReporter(stream=stream, enabled=True)
+    reporter.add_page(rows=1)
+    reporter.note_retry(attempt=3, wait=5.0)
+    reporter.close()
+    assert "retrying" not in stream.getvalue().rsplit("\r", 1)[-1]
+
+
 def test_note_retry_is_noop_when_disabled():
     stream = io.StringIO()
     reporter = ProgressReporter(stream=stream, enabled=False)

@@ -157,10 +157,17 @@ class ProgressReporter:
     def note_retry(self, *, attempt: int, wait: float) -> None:
         """Show that a sub-request is backing off before retry ``attempt``.
 
-        Cleared by the next :meth:`add_page` / :meth:`start_chunk` so the
-        line returns to normal progress once the retry succeeds.
+        Cleared by the next :meth:`add_page` / :meth:`start_chunk` (or by
+        :meth:`close`) so the line returns to normal once the retry resolves.
         """
-        self.retry_note = f"retrying (attempt {attempt}, waiting {wait:.0f}s)"
+        # Keep sub-second waits explicit (avoid misleading ``0s``) while
+        # rendering whole-second waits without unnecessary ``.0`` noise.
+        wait_1dp = round(wait, 1)
+        if wait_1dp < 1 or not wait_1dp.is_integer():
+            secs = f"{wait_1dp:.1f}s"
+        else:
+            secs = f"{wait_1dp:.0f}s"
+        self.retry_note = f"retrying (attempt {attempt}, waiting {secs})"
         self._render()
 
     def set_rate_remaining(
@@ -225,6 +232,13 @@ class ProgressReporter:
         """
         if self._closed:
             return
+        # A retry note set during the final backoff would otherwise freeze as
+        # the persisted last line of a call that has since completed or given
+        # up; clear it and redraw (while still un-closed, so ``_render`` runs)
+        # so the final state isn't a stale "retrying".
+        if self.enabled and self._rendered and self.retry_note is not None:
+            self.retry_note = None
+            self._render()
         self._closed = True
         if not (self.enabled and self._rendered):
             return

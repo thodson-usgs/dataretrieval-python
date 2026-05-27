@@ -1267,6 +1267,25 @@ def test_async_fan_out_emits_one_call_per_sub_request(monkeypatch):
     assert len(df) == len(seen_args)
 
 
+def test_async_fan_out_aggregates_headers_from_latest_completion(monkeypatch):
+    """Aggregated headers reflect the most recently completed chunk.
+
+    Completion order can differ from index order in parallel mode, so
+    rate-limit headers should come from whichever sub-request finished
+    last, not from the highest sub-args index.
+    """
+
+    async def fetch_async(args):
+        if "S1" * 10 in args["sites"]:
+            await asyncio.sleep(0.02)
+            return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=11)
+        return pd.DataFrame({"id": [_atom_id(args)]}), _ok_response(remaining=77)
+
+    fetch = _async_chunked_fetch(monkeypatch, fetch_async)
+    _, response = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
+    assert response.headers[_QUOTA_HEADER] == "11"
+
+
 def test_async_fan_out_failure_yields_resumable_call(monkeypatch):
     """A transient 5xx mid-fan-out raises ``ServiceInterrupted`` whose
     ``.call`` is a ``ChunkedCall`` holding the completed sub-requests
@@ -1491,6 +1510,24 @@ def test_retry_policy_from_env(monkeypatch):
         RetryPolicy.from_env()
 
 
+def test_retry_policy_rejects_invalid_settings():
+    with pytest.raises(ValueError):
+        RetryPolicy(max_retries=-1)
+    with pytest.raises(ValueError):
+        RetryPolicy(base_backoff=-0.5)
+    with pytest.raises(ValueError):
+        RetryPolicy(max_backoff=-1.0)
+
+
+def test_retry_policy_from_env_honors_monkeypatched_constants(monkeypatch):
+    # The timing knobs are read from the module constants at call time, so
+    # monkeypatching them (as the module comment promises) takes effect.
+    monkeypatch.setattr(_chunking, "_RETRY_MAX_BACKOFF", 0.0)
+    monkeypatch.setattr(_chunking, "_RETRY_BASE_BACKOFF", 0.0)
+    policy = RetryPolicy.from_env()
+    assert policy.max_backoff == 0.0 and policy.base_backoff == 0.0
+
+
 # -- _retryable taxonomy ----------------------------------------------------
 
 
@@ -1505,8 +1542,13 @@ def test_retryable_taxonomy():
     assert _retryable(RuntimeError("400")) == (False, None)
 
 
-def test_retryable_walks_cause_chain():
-    assert _retryable(_wrap_cause(RateLimited("429", retry_after=3.0))) == (True, 3.0)
+def test_retryable_skips_wrapped_midpagination_transient():
+    # A transient surfaced mid-pagination is re-wrapped as RuntimeError by
+    # _paginate; it must NOT be auto-retried (re-walking from page 1 would
+    # re-spend quota) — it escalates to the resumable handle instead. Only
+    # the raw, top-level (initial-request) transient is retryable.
+    assert _retryable(_wrap_cause(RateLimited("429", retry_after=3.0))) == (False, None)
+    assert _retryable(RateLimited("429", retry_after=3.0)) == (True, 3.0)
 
 
 # -- sync driver ------------------------------------------------------------
@@ -1650,3 +1692,25 @@ def test_async_fan_out_retries_transient_then_completes(monkeypatch):
     fetch = _async_chunked_fetch(monkeypatch, fetch_async)
     df, _ = fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
     assert len(df) > 1  # every sub-args atom recovered after the retry
+
+
+def test_async_fan_out_surfaces_fatal_over_transient(monkeypatch):
+    """A non-transient bug in one sub-request surfaces raw rather than
+    being masked behind a resumable interruption from a transient sibling."""
+    monkeypatch.setenv("API_USGS_RETRIES", "2")
+
+    async def _noslept(_d):
+        return None
+
+    monkeypatch.setattr(_chunking, "_ASLEEP", _noslept)
+
+    async def fetch_async(args):
+        # One chunk carries a deterministic programmer error; the rest are
+        # transient. The real bug must win over the resumable transient.
+        if "S1" * 10 in args["sites"]:
+            raise ValueError("deterministic bug")
+        raise ServiceUnavailable("503: transient")
+
+    fetch = _async_chunked_fetch(monkeypatch, fetch_async)
+    with pytest.raises(ValueError, match="deterministic bug"):
+        fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
