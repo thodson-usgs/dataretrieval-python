@@ -17,14 +17,14 @@ from dataretrieval.waterdata.utils import (
     _handle_stats_nesting,
     _parse_retry_after,
     _raise_for_non_200,
-    _walk_pages_async,
+    _walk_pages,
 )
 
 _LOGGER_NAME = _utils_module.__name__
 
 
-def _walk_pages(*, geopd, req, client):
-    """Drive the async ``_walk_pages_async`` to completion synchronously.
+def _run_walk_pages(*, geopd, req, client):
+    """Drive the async ``_walk_pages`` to completion synchronously.
 
     The chunker core is async-only now, so these tests build an
     ``AsyncMock(spec=httpx.AsyncClient)`` whose ``.send``/``.request`` are
@@ -32,7 +32,7 @@ def _walk_pages(*, geopd, req, client):
     keeps the historical sync-shaped call sites terse while exercising the
     real async pagination loop.
     """
-    return asyncio.run(_walk_pages_async(geopd=geopd, req=req, client=client))
+    return asyncio.run(_walk_pages(geopd=geopd, req=req, client=client))
 
 
 def test_get_args_basic():
@@ -99,7 +99,7 @@ def test_walk_pages_multiple_mocked():
     mock_req.url = "https://example.com/page1"
 
     # Call _walk_pages
-    df, final_resp = _walk_pages(geopd=False, req=mock_req, client=mock_client)
+    df, final_resp = _run_walk_pages(geopd=False, req=mock_req, client=mock_client)
 
     assert len(df) == 2
     assert list(df["val"]) == ["a", "b"]
@@ -134,7 +134,7 @@ def test_row_cap_truncates_and_stops_within_first_page():
     mock_req.url = "https://example.com/page1"
 
     with _row_cap(2):
-        df, _ = _walk_pages(geopd=False, req=mock_req, client=mock_client)
+        df, _ = _run_walk_pages(geopd=False, req=mock_req, client=mock_client)
 
     assert len(df) == 2  # truncated to the cap, not the page's 3 rows
     assert not mock_client.request.called  # ``next`` link never followed
@@ -169,7 +169,7 @@ def test_row_cap_stops_across_pages():
     mock_req.url = "https://example.com/page1"
 
     with _row_cap(2):
-        df, _ = _walk_pages(geopd=False, req=mock_req, client=mock_client)
+        df, _ = _run_walk_pages(geopd=False, req=mock_req, client=mock_client)
 
     assert len(df) == 2
     assert mock_client.request.call_count == 1  # fetched page 2, stopped before 3
@@ -233,7 +233,7 @@ def _walk_pages_with_failure(failure_resp_or_exc):
     mock_req.headers = {}
     mock_req.url = "https://example.com/page1"
 
-    return _walk_pages(geopd=False, req=mock_req, client=mock_client)
+    return _run_walk_pages(geopd=False, req=mock_req, client=mock_client)
 
 
 def test_walk_pages_raises_on_connection_error_mid_pagination():
@@ -321,40 +321,9 @@ def test_walk_pages_wraps_initial_page_parse_error():
     mock_req.url = "https://example.com/page1"
 
     with pytest.raises(RuntimeError, match="Paginated request failed") as excinfo:
-        _walk_pages(geopd=False, req=mock_req, client=mock_client)
+        _run_walk_pages(geopd=False, req=mock_req, client=mock_client)
 
     # The JSONDecodeError causing it is on __cause__ so callers can drill in.
-    assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
-
-
-def test_walk_pages_async_wraps_initial_page_parse_error():
-    """Async sibling of the above. ``_paginate_async`` must wrap an
-    initial-page parse failure with the same ``RuntimeError`` shape so
-    callers get a consistent diagnostic across sync and async paths."""
-    import asyncio
-
-    from dataretrieval.waterdata.utils import _walk_pages_async
-
-    resp = mock.MagicMock()
-    resp.status_code = 200
-    resp.url = "https://example.com/page1"
-    resp.json.side_effect = json.JSONDecodeError("Expecting value", "<html>...", 0)
-
-    mock_client = mock.AsyncMock(spec=httpx.AsyncClient)
-    mock_client.send.return_value = resp
-
-    mock_req = mock.MagicMock(spec=httpx.Request)
-    mock_req.method = "GET"
-    mock_req.headers = {}
-    mock_req.content = b""
-    mock_req.url = "https://example.com/page1"
-
-    async def run():
-        await _walk_pages_async(geopd=False, req=mock_req, client=mock_client)
-
-    with pytest.raises(RuntimeError, match="Paginated request failed") as excinfo:
-        asyncio.run(run())
-
     assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
 
 
@@ -416,7 +385,7 @@ def test_walk_pages_does_not_mutate_initial_response():
     mock_req.headers = {}
     mock_req.url = "https://example.com/page1"
 
-    df, final = _walk_pages(geopd=False, req=mock_req, client=mock_client)
+    df, final = _run_walk_pages(geopd=False, req=mock_req, client=mock_client)
     assert len(df) == 2
 
     # The original first-page response object must be unmutated:

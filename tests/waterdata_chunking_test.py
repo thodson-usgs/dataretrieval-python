@@ -42,9 +42,9 @@ from dataretrieval.waterdata.chunking import (
     RetryPolicy,
     ServiceInterrupted,
     ServiceUnavailable,
-    _chunked_async_client,
+    _chunked_client,
     _extract_axes,
-    _retry_async,
+    _retry,
     _retryable,
     multi_value_chunked,
 )
@@ -326,20 +326,20 @@ def test_multi_value_chunked_lazy_url_limit(monkeypatch):
 
 def test_chunked_session_shared_across_sub_requests():
     """Every sub-request of one chunked call sees the same
-    ``httpx.AsyncClient`` on the ``_chunked_async_client`` ContextVar, so
-    downstream paginated helpers (``_walk_pages_async``) can reuse the
+    ``httpx.AsyncClient`` on the ``_chunked_client`` ContextVar, so
+    downstream paginated helpers (``_walk_pages``) can reuse the
     connection pool instead of handshaking fresh on each sub-request."""
     sessions_seen = []
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
     async def fetch(args):
-        sessions_seen.append(_chunked_async_client.get())
+        sessions_seen.append(_chunked_client.get())
         return pd.DataFrame(), mock.Mock(
             elapsed=datetime.timedelta(seconds=0.1), headers={}
         )
 
     # Outside a chunked call: no session published (in this thread/context).
-    assert _chunked_async_client.get() is None
+    assert _chunked_client.get() is None
 
     fetch({"sites": ["S1" * 10, "S2" * 10, "S3" * 10, "S4" * 10]})
 
@@ -352,7 +352,7 @@ def test_chunked_session_shared_across_sub_requests():
     assert len({id(s) for s in sessions_seen}) == 1
     # The portal's worker context is torn down on exit, so the calling
     # thread's ContextVar still reads its default.
-    assert _chunked_async_client.get() is None
+    assert _chunked_client.get() is None
 
 
 def test_chunked_session_isolated_per_resume():
@@ -365,7 +365,7 @@ def test_chunked_session_isolated_per_resume():
 
     @multi_value_chunked(build_request=_fake_build, url_limit=240)
     async def fetch(args):
-        sessions_seen.append(_chunked_async_client.get())
+        sessions_seen.append(_chunked_client.get())
         i = state["i"]
         state["i"] += 1
         if i == 1 and state["blow_up"]:
@@ -383,14 +383,14 @@ def test_chunked_session_isolated_per_resume():
 
     # First run published a shared client to its sub-requests; the calling
     # thread's ContextVar is unaffected (reads its default).
-    assert _chunked_async_client.get() is None
+    assert _chunked_client.get() is None
     first_run_sessions = list(sessions_seen)
     assert first_run_sessions and all(s is not None for s in first_run_sessions)
 
     state["blow_up"] = False
     excinfo.value.call.resume()
     # Second run's ContextVar is also reset in the calling thread.
-    assert _chunked_async_client.get() is None
+    assert _chunked_client.get() is None
     # The resume opened a FRESH client, distinct from the first run's, so no
     # closed client leaks across runs.
     resume_sessions = sessions_seen[len(first_run_sessions) :]
@@ -930,9 +930,7 @@ def test_paginate_terminates_on_empty_string_cursor():
     req.content = b""
     req.url = "https://example.com/items?limit=1"
 
-    df, final = asyncio.run(
-        _utils._walk_pages_async(geopd=False, req=req, client=client)
-    )
+    df, final = asyncio.run(_utils._walk_pages(geopd=False, req=req, client=client))
 
     # Single send + zero follow-ups: the loop terminated on the empty cursor.
     assert client.send.called
@@ -1623,7 +1621,7 @@ def test_retryable_taxonomy():
 
 def test_retryable_skips_wrapped_midpagination_transient():
     # A transient surfaced mid-pagination is re-wrapped as RuntimeError by
-    # _paginate_async; it must NOT be auto-retried (re-walking from page 1
+    # _paginate; it must NOT be auto-retried (re-walking from page 1
     # would re-spend quota) — it escalates to the resumable handle instead.
     # Only the raw, top-level (initial-request) transient is retryable.
     assert _retryable(_wrap_cause(RateLimited("429", retry_after=3.0))) == (False, None)
@@ -1633,14 +1631,14 @@ def test_retryable_skips_wrapped_midpagination_transient():
 # -- async driver (the single retry driver; sync facade drives it) ----------
 #
 # The chunker is async-only now, so the retry loop lives solely in
-# ``_retry_async``. These tests pin the same behavioral contracts the old
+# ``_retry``. These tests pin the same behavioral contracts the old
 # ``_retry_sync`` tests asserted (transient-then-success, exhausted-reraises,
 # non-retryable-not-retried, long-retry-after-escalates), re-expressed on the
 # async driver and run via ``asyncio.run``; the sleep is patched to a no-op so
 # backoff doesn't actually wait.
 
 
-def test_retry_async_transient_then_recovers(monkeypatch):
+def test_retry_transient_then_recovers(monkeypatch):
     monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
     calls = {"n": 0}
 
@@ -1650,12 +1648,12 @@ def test_retry_async_transient_then_recovers(monkeypatch):
             raise RateLimited("429")
         return "ok"
 
-    out = asyncio.run(_retry_async(afn, RetryPolicy(max_retries=3, base_backoff=0.0)))
+    out = asyncio.run(_retry(afn, RetryPolicy(max_retries=3, base_backoff=0.0)))
     assert out == "ok"
     assert calls["n"] == 3  # two failures + one success
 
 
-def test_retry_async_exhausted_reraises(monkeypatch):
+def test_retry_exhausted_reraises(monkeypatch):
     monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
     calls = {"n": 0}
 
@@ -1664,11 +1662,11 @@ def test_retry_async_exhausted_reraises(monkeypatch):
         raise ServiceUnavailable("503")
 
     with pytest.raises(ServiceUnavailable):
-        asyncio.run(_retry_async(afn, RetryPolicy(max_retries=2, base_backoff=0.0)))
+        asyncio.run(_retry(afn, RetryPolicy(max_retries=2, base_backoff=0.0)))
     assert calls["n"] == 3  # first attempt + 2 retries
 
 
-def test_retry_async_non_retryable_not_retried(monkeypatch):
+def test_retry_non_retryable_not_retried(monkeypatch):
     slept: list[float] = []
 
     def _record(delay):
@@ -1683,11 +1681,11 @@ def test_retry_async_non_retryable_not_retried(monkeypatch):
         raise RuntimeError("400: bad request")
 
     with pytest.raises(RuntimeError):
-        asyncio.run(_retry_async(afn, RetryPolicy(max_retries=3)))
+        asyncio.run(_retry(afn, RetryPolicy(max_retries=3)))
     assert calls["n"] == 1 and slept == []
 
 
-def test_retry_async_long_retry_after_escalates(monkeypatch):
+def test_retry_long_retry_after_escalates(monkeypatch):
     slept: list[float] = []
 
     def _record(delay):
@@ -1702,14 +1700,14 @@ def test_retry_async_long_retry_after_escalates(monkeypatch):
         raise RateLimited("429", retry_after=999.0)
 
     with pytest.raises(RateLimited):
-        asyncio.run(_retry_async(afn, RetryPolicy(max_retries=5, retry_after_cap=60.0)))
+        asyncio.run(_retry(afn, RetryPolicy(max_retries=5, retry_after_cap=60.0)))
     assert calls["n"] == 1 and slept == []  # no inline wait for a long window
 
 
 # -- async driver (sleep-patched original) ----------------------------------
 
 
-def test_retry_async_transient_then_success(monkeypatch):
+def test_retry_transient_then_success(monkeypatch):
     async def _noslept(_d):
         return None
 
@@ -1722,7 +1720,7 @@ def test_retry_async_transient_then_success(monkeypatch):
             raise httpx.ReadTimeout("slow")
         return "ok"
 
-    out = asyncio.run(_retry_async(afn, RetryPolicy(max_retries=3, base_backoff=0.0)))
+    out = asyncio.run(_retry(afn, RetryPolicy(max_retries=3, base_backoff=0.0)))
     assert out == "ok" and calls["n"] == 2
 
 

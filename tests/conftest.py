@@ -51,7 +51,7 @@ def _serial_chunker(monkeypatch):
     which keeps sub-request dispatch deterministic enough for the mocked
     suite. ``API_USGS_RETRIES=0`` makes a single transient surface
     immediately rather than be retried. The mocked tests drive the async
-    ``_walk_pages_async`` (via ``asyncio.run`` / an ``AsyncMock`` client),
+    ``_walk_pages`` (via ``asyncio.run`` / an ``AsyncMock`` client),
     not a sync sibling. Pinning both keeps the test surface focused on the
     planner / fetch contracts; async-fan-out and retry tests opt in by
     overriding the env inside their body.

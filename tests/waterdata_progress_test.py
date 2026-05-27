@@ -21,11 +21,11 @@ from dataretrieval.waterdata._progress import (
     current,
     progress_context,
 )
-from dataretrieval.waterdata.utils import _walk_pages_async
+from dataretrieval.waterdata.utils import _walk_pages
 
 
-def _walk_pages(*, geopd, req, client):
-    """Drive the async ``_walk_pages_async`` to completion synchronously.
+def _run_walk_pages(*, geopd, req, client):
+    """Drive the async ``_walk_pages`` to completion synchronously.
 
     The chunker core is async-only now, so these tests build an
     ``AsyncMock(spec=httpx.AsyncClient)`` whose ``.send``/``.request`` are
@@ -33,7 +33,7 @@ def _walk_pages(*, geopd, req, client):
     reporter is bound on a contextvar, which the coroutine inherits when
     ``asyncio.run`` copies the calling context.
     """
-    return asyncio.run(_walk_pages_async(geopd=geopd, req=req, client=client))
+    return asyncio.run(_walk_pages(geopd=geopd, req=req, client=client))
 
 
 @pytest.fixture(autouse=True)
@@ -379,7 +379,7 @@ def test_walk_pages_reports_pages_and_rate_limit():
 
     stream = io.StringIO()
     with progress_context(service="daily", stream=stream, enabled=True):
-        df, _ = _walk_pages(geopd=False, req=req, client=client)
+        df, _ = _run_walk_pages(geopd=False, req=req, client=client)
 
     assert len(df) == 2
     out = stream.getvalue()
@@ -401,7 +401,7 @@ def test_walk_pages_without_context_does_not_error():
     req.headers = {}
     req.url = "https://example.com/p1"
 
-    df, _ = _walk_pages(geopd=False, req=req, client=client)
+    df, _ = _run_walk_pages(geopd=False, req=req, client=client)
     assert len(df) == 1
     assert current() is None
 
@@ -423,7 +423,7 @@ def test_broken_progress_stream_does_not_truncate_pagination():
     req.url = "https://example.com/p1"
 
     with progress_context(stream=_RaisingStream(), enabled=True):
-        df, _ = _walk_pages(geopd=False, req=req, client=client)
+        df, _ = _run_walk_pages(geopd=False, req=req, client=client)
 
     assert len(df) == 2  # both pages returned despite the broken progress stream
 
@@ -431,14 +431,14 @@ def test_broken_progress_stream_does_not_truncate_pagination():
 # -- async path integration ----------------------------------------------------
 
 
-def test_paginate_async_reports_pages_through_active_reporter(monkeypatch):
+def test_paginate_reports_pages_through_active_reporter(monkeypatch):
     """The async paginate path must drive the same progress reporter the
     sync path does. Pages and rate-limit updates from each completed
     page should land via the active ``ProgressReporter``, exactly as
     they would on ``_walk_pages``."""
     import asyncio
 
-    from dataretrieval.waterdata.utils import _paginate_async
+    from dataretrieval.waterdata.utils import _paginate
 
     resp1 = _resp(
         [{"id": "1", "properties": {"v": "a"}}],
@@ -454,7 +454,7 @@ def test_paginate_async_reports_pages_through_active_reporter(monkeypatch):
         )
         return mock.MagicMock(empty=False, __len__=lambda self: 1), nxt
 
-    # _paginate_async expects parse_response to be sync, like the sync path.
+    # _paginate expects parse_response to be sync, like the sync path.
     def parse_sync(resp):
         body = resp.json()
         nxt = next(
@@ -479,7 +479,7 @@ def test_paginate_async_reports_pages_through_active_reporter(monkeypatch):
 
     async def run():
         with progress_context(service="continuous", stream=stream, enabled=True):
-            df, _ = await _paginate_async(
+            df, _ = await _paginate(
                 req,
                 parse_response=parse_sync,
                 follow_up=follow_up,

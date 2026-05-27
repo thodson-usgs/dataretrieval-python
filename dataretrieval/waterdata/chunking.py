@@ -9,20 +9,18 @@ for each axis that minimizes total sub-requests under the URL budget;
 sub-request URL fits. Requests that already fit get a trivial
 single-step plan — ``ChunkedCall`` has one code path either way.
 
-Concurrency: the execution core is async-only. ``multi_value_chunked``
-fans every pending sub-request out under one ``asyncio.gather`` sharing
-a single ``httpx.AsyncClient``; concurrency is bounded purely by the
-client's connection pool (``httpx.Limits(max_connections=N,
-max_keepalive_connections=N)``), so the pool — not a semaphore —
-throttles. ``API_USGS_CONCURRENT`` resolves ``N``: an integer N > 1
-caps connections at N; ``1`` pins a single connection (effectively
-serial); the literal ``unbounded`` removes the cap (``N=None``). The
-default (16) is the server-friendly sweet spot; higher values can trip
-USGS burst-protection 5xx in practice. The fan-out runs in a
-short-lived worker thread (an ``anyio`` blocking portal), so the
-synchronous public API drives it whether or not the caller is already
-inside an event loop (Jupyter / IPython / async apps) — no nested-loop
-error and no silent serial degradation.
+Concurrency: ``multi_value_chunked`` fans every pending sub-request out
+under one ``asyncio.gather`` sharing a single ``httpx.AsyncClient``;
+concurrency is bounded purely by the client's connection pool
+(``httpx.Limits(max_connections=N, max_keepalive_connections=N)``), so
+the pool — not a semaphore — throttles. ``API_USGS_CONCURRENT`` resolves
+``N``: an integer N > 1 caps connections at N; ``1`` pins a single
+connection (one request at a time); the literal ``unbounded`` removes
+the cap (``N=None``). The default (16) is the server-friendly sweet
+spot; higher values can trip USGS burst-protection 5xx in practice. The
+fan-out runs in a short-lived worker thread (an ``anyio`` blocking
+portal), so it works whether or not the caller is already inside an
+event loop (Jupyter / IPython / async apps).
 
 Retries: each sub-request is retried on a transient failure (429,
 5xx, connect/read timeout) with exponential backoff + full jitter,
@@ -38,8 +36,7 @@ as a ``ChunkInterrupted`` subclass — ``QuotaExhausted`` for 429,
 ``ChunkedCall`` handle that owns the already-completed sub-request
 state (sparse-indexed, since gathered sub-requests complete out of
 order). Call ``.call.resume()`` once the underlying condition clears;
-only the still-pending sub-requests are re-issued (``resume()`` is a
-synchronous facade over the same async runner). ``Retry-After`` (when
+only the still-pending sub-requests are re-issued. ``Retry-After`` (when
 the server sets it) is surfaced on the exception as ``.retry_after``.
 
 Dedup: list-axis chunks don't overlap; filter-axis chunks can, so
@@ -121,13 +118,12 @@ _NEVER_CHUNK = frozenset(
 # Response header USGS uses to advertise remaining hourly quota.
 _QUOTA_HEADER = "x-ratelimit-remaining"
 
-# Environment variable that controls async fan-out concurrency. Read
-# at call time (not import) so test patches via ``monkeypatch.setenv``
-# take effect. The default (16) is the server-friendly sweet spot:
-# higher values trip the upstream into 5xx burst-protection in
-# practice. Set to ``1`` to force the serial sync path, set to
-# ``unbounded`` for no per-call cap (use sparingly — you own the
-# upstream-burst risk).
+# Environment variable that controls fan-out concurrency. Read at call
+# time (not import) so test patches via ``monkeypatch.setenv`` take
+# effect. The default (16) is the server-friendly sweet spot: higher
+# values trip the upstream into 5xx burst-protection in practice. Set to
+# ``1`` for a single connection, set to ``unbounded`` for no per-call cap
+# (use sparingly — you own the upstream-burst risk).
 _CONCURRENCY_ENV = "API_USGS_CONCURRENT"
 _CONCURRENCY_DEFAULT = 16
 _CONCURRENCY_UNBOUNDED = "unbounded"
@@ -140,8 +136,8 @@ def _read_concurrency_env() -> int | None:
     Returns
     -------
     int or None
-        ``1`` for the serial sync path; an integer >1 for bounded
-        parallelism; ``None`` to disable the per-call cap entirely
+        ``1`` for a single connection; an integer >1 for bounded
+        concurrency; ``None`` to disable the per-call cap entirely
         (``unbounded`` keyword). Unset → default of
         ``_CONCURRENCY_DEFAULT``.
     """
@@ -328,50 +324,50 @@ _NO_RETRY = RetryPolicy(max_retries=0)
 
 
 # The single shared ``httpx.AsyncClient`` of an in-flight chunked call,
-# published (via :func:`_publish`) during ``ChunkedCall._run`` so async
-# paginated-loop helpers downstream (``_walk_pages_async``) reuse one
+# published (via :func:`_publish`) during ``ChunkedCall._run`` so the
+# paginated-loop helpers downstream (``_walk_pages``) reuse one
 # connection pool across every gathered sub-request of the call. ``None``
 # when not inside a chunked call — paginated helpers fall back to their
 # own short-lived client in that case.
-_chunked_async_client: ContextVar[httpx.AsyncClient | None] = ContextVar(
-    "_chunked_async_client", default=None
+_chunked_client: ContextVar[httpx.AsyncClient | None] = ContextVar(
+    "_chunked_client", default=None
 )
 
 
 @contextmanager
 def _publish(client: httpx.AsyncClient) -> Iterator[None]:
     """
-    Bind ``client`` to the ``_chunked_async_client`` ContextVar for the
+    Bind ``client`` to the ``_chunked_client`` ContextVar for the
     duration of the ``with`` block (wrapping the set/reset token dance),
-    so async paginated-loop helpers can borrow the chunker's shared
-    client via :func:`get_active_async_client`.
+    so the paginated-loop helpers can borrow the chunker's shared client
+    via :func:`get_active_client`.
 
     Parameters
     ----------
     client : httpx.AsyncClient
-        The client to publish on ``_chunked_async_client``.
+        The client to publish on ``_chunked_client``.
 
     Yields
     ------
     None
         Yields once, for the duration of the bind.
     """
-    token = _chunked_async_client.set(client)
+    token = _chunked_client.set(client)
     try:
         yield
     finally:
-        _chunked_async_client.reset(token)
+        _chunked_client.reset(token)
 
 
-def get_active_async_client() -> httpx.AsyncClient | None:
+def get_active_client() -> httpx.AsyncClient | None:
     """
-    Return the chunker's currently-published async client, or ``None``.
+    Return the chunker's currently-published client, or ``None``.
 
-    Public accessor for the ``_chunked_async_client`` ContextVar so
+    Public accessor for the ``_chunked_client`` ContextVar so
     sibling modules (notably
-    :func:`dataretrieval.waterdata.utils._client_for_async`) don't have
-    to reach into the private ContextVar directly. Used by async
-    paginated-loop helpers to reuse the per-call AsyncClient pool.
+    :func:`dataretrieval.waterdata.utils._client_for`) don't have
+    to reach into the private ContextVar directly. Used by the
+    paginated-loop helpers to reuse the per-call connection pool.
 
     Returns
     -------
@@ -379,7 +375,7 @@ def get_active_async_client() -> httpx.AsyncClient | None:
         The client published via :func:`_publish` if currently inside a
         :class:`ChunkedCall` run; ``None`` otherwise.
     """
-    return _chunked_async_client.get()
+    return _chunked_client.get()
 
 
 # Separators the two axis kinds use to join their atoms back into
@@ -388,9 +384,8 @@ def get_active_async_client() -> httpx.AsyncClient | None:
 _LIST_SEP = ","
 _OR_SEP = " OR "
 
-# The chunker's execution core is async-only: the decorated fetcher, the
-# ``ChunkedCall`` it drives, and the per-sub-request runner are all
-# coroutines. ``_Fetch`` is an ``async def fetch(args) -> (df, response)``.
+# ``_Fetch`` is the per-sub-request fetcher the decorator wraps and
+# ``ChunkedCall`` drives: an ``async def fetch(args) -> (df, response)``.
 _Fetch = Callable[[dict[str, Any]], Awaitable[tuple[pd.DataFrame, httpx.Response]]]
 
 # Caller-supplied transform applied to the *combined* chunk result. It lets a
@@ -1136,7 +1131,7 @@ def _retryable(exc: BaseException) -> tuple[bool, float | None]:
 
     Inspects only the *top-level* exception, by design — and so is
     deliberately narrower than :func:`_classify_chunk_error`, which walks
-    the ``__cause__`` chain for resumability. ``_paginate_async`` raises an
+    the ``__cause__`` chain for resumability. ``_paginate`` raises an
     initial-request transient (429 / 5xx / :class:`httpx.TransportError`
     such as ``ConnectError`` / ``ReadTimeout``) *raw*, but re-wraps any
     mid-pagination failure as a ``RuntimeError``. Retrying only the raw,
@@ -1204,7 +1199,7 @@ def _retry_delay(exc: BaseException, attempt: int, policy: RetryPolicy) -> float
     return delay
 
 
-async def _retry_async(
+async def _retry(
     afn: Callable[[], Awaitable[tuple[pd.DataFrame, httpx.Response]]],
     policy: RetryPolicy,
 ) -> tuple[pd.DataFrame, httpx.Response]:
@@ -1374,14 +1369,13 @@ class ChunkedCall:
     both for the first invocation (from :meth:`ChunkPlan.execute`) and
     for subsequent retries after a :class:`ChunkInterrupted`.
 
-    The execution core is the async :meth:`_run` (gather every pending
-    sub-request over one shared :class:`httpx.AsyncClient`, apply the
-    failure-precedence rules, combine); :meth:`resume` is a thin
-    synchronous facade that drives :meth:`_run` through an ``anyio``
-    blocking portal so it works whether or not the caller is already
-    inside an event loop. There is no separate serial path: concurrency
-    is bounded purely by the client's connection pool, so a single
-    connection (``API_USGS_CONCURRENT=1``) is just a degenerate gather.
+    :meth:`_run` gathers every pending sub-request over one shared
+    :class:`httpx.AsyncClient`, applies the failure-precedence rules, and
+    combines; :meth:`resume` drives it through an ``anyio`` blocking
+    portal so it works whether or not the caller is already inside an
+    event loop. Concurrency is bounded purely by the client's connection
+    pool, so a single connection (``API_USGS_CONCURRENT=1``) is just a
+    degenerate gather.
 
     A ``ChunkedCall`` is created internally when a :class:`ChunkPlan`
     executes; callers reach it via :attr:`ChunkInterrupted.call` on
@@ -1611,14 +1605,13 @@ class ChunkedCall:
 
     def resume(self) -> tuple[pd.DataFrame, Any]:
         """
-        Drive the chunked call to completion. Synchronous facade.
+        Drive the chunked call to completion and return the combined result.
 
-        Runs the async core :meth:`_run` through an ``anyio`` blocking
-        portal (a short-lived worker thread), so the synchronous public
-        API works whether or not the caller is already inside an event
-        loop (Jupyter / IPython / async apps) — no nested-``asyncio.run``
-        error. The portal copies the calling context, so the active
-        progress reporter still reaches the fan-out.
+        Runs :meth:`_run` through an ``anyio`` blocking portal (a
+        short-lived worker thread), so it works whether or not the caller
+        is already inside an event loop (Jupyter / IPython / async apps).
+        The portal copies the calling context, so the active progress
+        reporter still reaches the sub-requests.
 
         Idempotent: only sub-requests whose index isn't already in
         ``self._chunks`` are re-issued. Sub-args order matches
@@ -1667,10 +1660,10 @@ class ChunkedCall:
         ``httpx.Limits(max_connections=N, max_keepalive_connections=N)``
         where ``N = max_concurrent`` (``None`` for unbounded). There is no
         semaphore: the gather dispatches *every* pending sub-request and the
-        pool throttles, so ``N=1`` is just a single-connection gather
-        (effectively serial) and ``total <= 1`` is just a one-element gather.
-        The shared client is published on :data:`_chunked_async_client` so
-        async paginated-loop helpers reuse its connection pool.
+        pool throttles, so ``N=1`` is just a single-connection gather (one
+        request at a time) and ``total <= 1`` is just a one-element gather.
+        The shared client is published on :data:`_chunked_client` so
+        the paginated-loop helpers reuse its connection pool.
 
         Parameters
         ----------
@@ -1714,9 +1707,7 @@ class ChunkedCall:
                     index: int, args: dict[str, Any]
                 ) -> tuple[pd.DataFrame, httpx.Response]:
                     """One sub-request (with retry) + record + progress tick."""
-                    result = await _retry_async(
-                        lambda: self.fetch(args), self.retry_policy
-                    )
+                    result = await _retry(lambda: self.fetch(args), self.retry_policy)
                     self.record(index, result)
                     if reporter is not None:
                         # Chunks finish out of order under gather, so tick the
@@ -1775,18 +1766,15 @@ def multi_value_chunked(
     single-step plan, so the decorated function has one code path
     either way.
 
-    The decorated function is an ``async def fetch(args) -> (df,
-    response)``; the *returned wrapper is synchronous*. The wrapper builds
-    the :class:`ChunkPlan`, constructs a :class:`ChunkedCall` over the
-    async fetcher, and drives it to completion via
-    :meth:`ChunkedCall.resume` — which runs the async core in an ``anyio``
-    worker-thread portal so it works whether or not the caller is already
-    inside an event loop (Jupyter / IPython / async apps). Every pending
-    sub-request is gathered under one :class:`httpx.AsyncClient`;
-    concurrency is bounded purely by the connection pool, sized from
-    ``API_USGS_CONCURRENT``. ``API_USGS_CONCURRENT=1`` is just a
-    single-connection gather and ``plan.total <= 1`` a one-element gather
-    — neither is a special-cased path.
+    Decorates an ``async def fetch(args) -> (df, response)`` and returns a
+    callable that builds the :class:`ChunkPlan`, constructs a
+    :class:`ChunkedCall` over the fetcher, and drives it to completion via
+    :meth:`ChunkedCall.resume` (an ``anyio`` worker-thread portal, so it
+    works whether or not the caller is already inside an event loop —
+    Jupyter / IPython / async apps). Every pending sub-request is gathered
+    under one :class:`httpx.AsyncClient`; concurrency is bounded purely by
+    the connection pool, sized from ``API_USGS_CONCURRENT`` (``1`` is a
+    single-connection gather, ``plan.total <= 1`` a one-element gather).
 
     Parameters
     ----------

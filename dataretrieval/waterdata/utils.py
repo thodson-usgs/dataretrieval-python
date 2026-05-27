@@ -33,7 +33,7 @@ from dataretrieval.waterdata.chunking import (
     RateLimited,
     ServiceUnavailable,
     _safe_elapsed,
-    get_active_async_client,
+    get_active_client,
 )
 from dataretrieval.waterdata.types import (
     PROFILE_LOOKUP,
@@ -530,7 +530,7 @@ def _paginated_failure_message(pages_collected: int, cause: BaseException) -> st
     -------
     str
         A message suitable for the ``RuntimeError`` that
-        ``_walk_pages_async`` and ``get_stats_data`` raise from the
+        ``_walk_pages`` and ``get_stats_data`` raise from the
         original exception.
     """
     cause_str = str(cause).removesuffix(".")
@@ -774,7 +774,7 @@ def _get_resp_data(
     # ``features`` is a real schema-drift shape (mirrors the guard in
     # ``_handle_stats_nesting``). Treat as empty rather than crash with
     # ``KeyError`` — the wrapped failure would otherwise look like a
-    # transient transport error to ``_paginate_async``'s exception handler.
+    # transient transport error to ``_paginate``'s exception handler.
     features = body.get("features") or []
     if not features:
         return gpd.GeoDataFrame() if geopd else pd.DataFrame()
@@ -806,7 +806,7 @@ def _get_resp_data(
 
 
 @asynccontextmanager
-async def _client_for_async(
+async def _client_for(
     client: httpx.AsyncClient | None,
 ) -> AsyncIterator[httpx.AsyncClient]:
     """
@@ -818,7 +818,7 @@ async def _client_for_async(
        here — the caller owns its lifecycle).
     2. The chunker's shared async client if we're inside a
        :class:`~dataretrieval.waterdata.chunking.ChunkedCall` run (per
-       :func:`chunking.get_active_async_client`). Borrowed; the chunker
+       :func:`chunking.get_active_client`). Borrowed; the chunker
        closes it on exit.
     3. A fresh short-lived ``httpx.AsyncClient`` opened here and closed
        on context exit.
@@ -837,7 +837,7 @@ async def _client_for_async(
     if client is not None:
         yield client
         return
-    shared = get_active_async_client()
+    shared = get_active_client()
     if shared is not None:
         yield shared
         return
@@ -890,14 +890,14 @@ _Cursor = TypeVar("_Cursor")
 # Optional cap on the total rows a single paginated call accumulates before it
 # stops following ``next`` links. ``None`` (the default the data getters use)
 # means "no cap — fetch the whole series". Set via :func:`_row_cap` so the deep
-# ``_paginate_async`` loop can honor it without threading the value through the
+# ``_paginate`` loop can honor it without threading the value through the
 # generic chunker; this mirrors the ``_progress`` ambient-reporter pattern.
 _row_cap_var: ContextVar[int | None] = ContextVar("waterdata_row_cap", default=None)
 
 
 @contextmanager
 def _row_cap(max_rows: int | None) -> Iterator[None]:
-    """Cap the rows any :func:`_paginate_async` under this context will
+    """Cap the rows any :func:`_paginate` under this context will
     accumulate (``None`` = uncapped). Used by :func:`get_reference_table`
     to preview large tables without downloading every page."""
     token = _row_cap_var.set(max_rows)
@@ -907,7 +907,7 @@ def _row_cap(max_rows: int | None) -> Iterator[None]:
         _row_cap_var.reset(token)
 
 
-async def _paginate_async(
+async def _paginate(
     initial_req: httpx.Request,
     *,
     parse_response: Callable[[httpx.Response], tuple[pd.DataFrame, _Cursor | None]],
@@ -918,7 +918,7 @@ async def _paginate_async(
     Drive a paginated request to completion over an
     :class:`httpx.AsyncClient`.
 
-    The common shape behind :func:`_walk_pages_async` and
+    The common shape behind :func:`_walk_pages` and
     :func:`get_stats_data`: send the initial request, then loop calling
     ``follow_up`` until ``parse_response`` reports a ``None`` cursor,
     accumulating frames and elapsed time. Any mid-pagination failure
@@ -974,7 +974,7 @@ async def _paginate_async(
     """
     logger.debug("Requesting: %s", initial_req.url)
     reporter = _progress.current()
-    async with _client_for_async(client) as sess:
+    async with _client_for(client) as sess:
         resp = await sess.send(initial_req)
         _raise_for_non_200(resp)
         initial_response = resp
@@ -1040,8 +1040,8 @@ def _ogc_parse_response(
 ) -> tuple[pd.DataFrame, str | None]:
     """Parse one OGC API page: extract the DataFrame and the next-page URL.
 
-    The parse strategy :func:`_walk_pages_async` hands to
-    :func:`_paginate_async`. Coerces falsy cursors (empty href, etc.) to
+    The parse strategy :func:`_walk_pages` hands to
+    :func:`_paginate`. Coerces falsy cursors (empty href, etc.) to
     ``None`` so the paginate loop's ``while cursor is not None``
     terminates instead of spinning on a meaningless value.
     """
@@ -1052,7 +1052,7 @@ def _ogc_parse_response(
     )
 
 
-async def _walk_pages_async(
+async def _walk_pages(
     geopd: bool,
     req: httpx.Request,
     client: httpx.AsyncClient | None = None,
@@ -1061,7 +1061,7 @@ async def _walk_pages_async(
     Iterate paginated OGC API responses asynchronously and aggregate
     them into one DataFrame.
 
-    Thin wrapper that hands off to :func:`_paginate_async` with
+    Thin wrapper that hands off to :func:`_paginate` with
     OGC-specific strategies: pages are parsed via :func:`_get_resp_data`
     (through :func:`_ogc_parse_response`) and the next-page cursor is the
     URL from the response's ``links`` array (per :func:`_next_req_url`).
@@ -1074,7 +1074,7 @@ async def _walk_pages_async(
         The initial HTTP request to send.
     client : httpx.AsyncClient, optional
         Caller-borrowed client; ``None`` defers client management to
-        :func:`_paginate_async`.
+        :func:`_paginate`.
 
     Returns
     -------
@@ -1088,9 +1088,9 @@ async def _walk_pages_async(
     Raises
     ------
     RuntimeError
-        See :func:`_paginate_async`.
+        See :func:`_paginate`.
     httpx.HTTPError
-        See :func:`_paginate_async`.
+        See :func:`_paginate`.
     """
     method = req.method  # ``httpx.Request.method`` is already upper-cased.
     headers = req.headers
@@ -1099,7 +1099,7 @@ async def _walk_pages_async(
     async def follow_up(cursor: str, sess: httpx.AsyncClient) -> httpx.Response:
         return await sess.request(method, cursor, headers=headers, content=content)
 
-    return await _paginate_async(
+    return await _paginate(
         req,
         parse_response=functools.partial(_ogc_parse_response, geopd=geopd),
         follow_up=follow_up,
@@ -1298,7 +1298,7 @@ def _finalize_ogc(
     ``max_rows`` is applied here (after dedup/sort, on the *combined* frame)
     rather than only per-sub-request, so a chunked call's total is bounded
     to exactly ``max_rows`` and a resumed call honors the cap too — the
-    per-``_paginate_async`` ``_row_cap`` is only an early-stop download bound.
+    per-``_paginate`` ``_row_cap`` is only an early-stop download bound.
     """
     frame = _deal_with_empty(frame, properties, service)
     if convert_type:
@@ -1415,7 +1415,7 @@ async def _fetch_once(
     ``(frame, response)``.
     """
     req = _construct_api_requests(**args)
-    return await _walk_pages_async(geopd=GEOPANDAS, req=req)
+    return await _walk_pages(geopd=GEOPANDAS, req=req)
 
 
 def _handle_stats_nesting(
@@ -1588,14 +1588,11 @@ def get_stats_data(
     handles pagination, processes results, and formats output according
     to the specified parameters.
 
-    Synchronous facade: the stats path doesn't go through
-    ``multi_value_chunked`` (its query shape has no chunkable list axes),
-    so it drives :func:`_paginate_async` directly through an ``anyio``
-    blocking portal — the same async-only core the chunked getters use —
-    while keeping a synchronous signature and ``(df, BaseMetadata)``
-    return. The portal runs the pagination loop in a short-lived worker
-    thread, so this works whether or not the caller is already inside an
-    event loop.
+    The stats path doesn't go through ``multi_value_chunked`` (its query
+    shape has no chunkable list axes), so it drives :func:`_paginate`
+    directly through an ``anyio`` blocking portal. The portal runs the
+    pagination loop in a short-lived worker thread, so this works whether
+    or not the caller is already inside an event loop.
 
     Parameters
     ----------
@@ -1633,7 +1630,7 @@ def get_stats_data(
 
     def parse_response(resp: httpx.Response) -> tuple[pd.DataFrame, str | None]:
         body = resp.json()
-        # Coerce falsy cursors ("", 0) to None so _paginate_async terminates.
+        # Coerce falsy cursors ("", 0) to None so _paginate terminates.
         # USGS uses "next": null at end-of-stream, but defensive coerce
         # protects against any "" sentinel a future schema might use.
         return _handle_stats_nesting(body, geopd=GEOPANDAS), body.get("next") or None
@@ -1646,7 +1643,7 @@ def get_stats_data(
         )
 
     async def _run() -> tuple[pd.DataFrame, httpx.Response]:
-        return await _paginate_async(
+        return await _paginate(
             req,
             parse_response=parse_response,
             follow_up=follow_up,
@@ -1654,7 +1651,7 @@ def get_stats_data(
         )
 
     # The stats path opens its own progress context (it doesn't go through
-    # ``multi_value_chunked``); ``_paginate_async`` reports pages/rate-limit
+    # ``multi_value_chunked``); ``_paginate`` reports pages/rate-limit
     # into it. The portal copies the calling context, so the reporter still
     # reaches the worker thread.
     with _progress.progress_context(service=service):
