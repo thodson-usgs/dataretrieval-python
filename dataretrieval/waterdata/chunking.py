@@ -30,9 +30,10 @@ than the per-call ceiling isn't slept off inline — it escalates to
 the resumable interruption below so a multi-minute quota-window
 reset doesn't block the call.
 
-Interruption: any mid-stream transient failure (429, 5xx) surfaces
-as a ``ChunkInterrupted`` subclass — ``QuotaExhausted`` for 429,
-``ServiceInterrupted`` for 5xx. The exception carries ``.call``, a
+Interruption: any mid-stream transient failure — 429, 5xx, or a bare
+transport error (connect/read timeout, oversize follow-up URL) — surfaces
+as a ``ChunkInterrupted`` subclass: ``QuotaExhausted`` for 429,
+``ServiceInterrupted`` for the rest. The exception carries ``.call``, a
 ``ChunkedCall`` handle that owns the already-completed sub-request
 state (sparse-indexed, since gathered sub-requests complete out of
 order). Call ``.call.resume()`` once the underlying condition clears;
@@ -1596,11 +1597,11 @@ class ChunkedCall:
         Raises
         ------
         ChunkInterrupted
-            On a mid-stream transient failure
-            (:class:`QuotaExhausted` for 429,
-            :class:`ServiceInterrupted` for 5xx). The resumable handle
-            is on ``exc.call`` — wait for the underlying condition to
-            clear and call ``exc.call.resume()`` again.
+            On a mid-stream transient failure — 429, 5xx, or a bare
+            transport error: :class:`QuotaExhausted` for 429,
+            :class:`ServiceInterrupted` for the rest. The resumable
+            handle is on ``exc.call`` — wait for the underlying
+            condition to clear and call ``exc.call.resume()`` again.
         """
         concurrency = _read_concurrency_env()
         with start_blocking_portal() as portal:
@@ -1613,8 +1614,9 @@ class ChunkedCall:
 
         Pending sub-requests (:meth:`_pending`) fan out under
         ``asyncio.gather`` with ``return_exceptions=True`` so completed
-        sub-requests survive a sibling's transient failure. On a recognized
-        transient (:class:`RateLimited`, :class:`ServiceUnavailable`) a
+        sub-requests survive a sibling's transient failure. On a
+        recognized transient (:class:`RateLimited`, :class:`ServiceUnavailable`,
+        or a bare ``httpx.HTTPError`` / ``httpx.InvalidURL``) a
         :class:`ChunkInterrupted` subclass is raised carrying ``self`` on
         ``.call``; ``exc.call.resume()`` then re-issues only the unfinished
         indices through this same runner.
