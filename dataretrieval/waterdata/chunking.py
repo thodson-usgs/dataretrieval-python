@@ -26,9 +26,7 @@ Retries: each sub-request is retried on a transient failure (429,
 5xx, connect/read timeout) with exponential backoff + full jitter,
 honoring a server ``Retry-After`` when present. ``API_USGS_RETRIES``
 sets the cap (default 4; ``0`` disables). A ``Retry-After`` longer
-than the per-call ceiling isn't slept off inline — it escalates to
-the resumable interruption below so a multi-minute quota-window
-reset doesn't block the call.
+than the per-call ceiling escalates to a resumable interruption.
 
 Interruption: any mid-stream transient failure — 429, 5xx, or a bare
 transport error (connect/read timeout, oversize follow-up URL) — surfaces
@@ -1128,12 +1126,6 @@ def _retryable(exc: BaseException) -> tuple[bool, float | None]:
     return False, None
 
 
-# Sleep hook, indirected through a module global so tests can
-# ``monkeypatch.setattr`` it to a no-op instead of waiting for real
-# backoff. Production uses the stdlib call.
-_ASLEEP = asyncio.sleep
-
-
 def _retry_delay(exc: BaseException, attempt: int, policy: RetryPolicy) -> float | None:
     """
     Decide the backoff for a just-failed ``attempt`` (1-based), or ``None``
@@ -1206,7 +1198,7 @@ async def _retry(
             delay = _retry_delay(exc, attempt, policy)
             if delay is None:
                 raise
-            await _ASLEEP(delay)
+            await asyncio.sleep(delay)
 
 
 def _combine_chunk_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -1401,25 +1393,9 @@ class ChunkedCall:
         self.finalize = finalize
         # Completed (frame, response) pairs keyed by sub-args index; sparse
         # (gathered sub-requests complete out of order — see class docstring).
+        # ``_run``'s ``track`` closure is the only writer, so ``dict`` insertion
+        # order is completion order (relied on by :meth:`_combine_raw`).
         self._chunks: dict[int, tuple[pd.DataFrame, httpx.Response]] = {}
-
-    def record(self, index: int, pair: tuple[pd.DataFrame, httpx.Response]) -> None:
-        """
-        Record a completed sub-request's ``(frame, response)`` pair under
-        its sub-args index.
-
-        The single writer of ``self._chunks`` — used by the gather in
-        :meth:`_run` — so ``dict`` insertion order is completion order
-        (see :meth:`_combine_raw`).
-
-        Parameters
-        ----------
-        index : int
-            The sub-args index this completed pair belongs to.
-        pair : tuple of (pandas.DataFrame, httpx.Response)
-            The completed sub-request's ``(frame, response)`` pair.
-        """
-        self._chunks[index] = pair
 
     def wrap_failure(self, exc: BaseException) -> ChunkInterrupted | None:
         """
@@ -1482,25 +1458,6 @@ class ChunkedCall:
             _combine_chunk_frames(frames),
             _combine_chunk_responses(responses, self.plan.canonical_url),
         )
-
-    def combined(self) -> tuple[pd.DataFrame, Any]:
-        """
-        Combine every recorded sub-request and apply :attr:`finalize`.
-
-        Returned by :meth:`_run` on a completed call (first run or
-        resume). The ``partial_*`` accessors deliberately do NOT route
-        through here — they return the raw :meth:`_combine_raw` snapshot
-        to stay cheap and side-effect-free.
-
-        Returns
-        -------
-        tuple of (pandas.DataFrame, finalized response)
-            The combined frame and whatever :attr:`finalize` produces —
-            a raw :class:`httpx.Response` by default, or the OGC
-            getters' type-coerced / column-arranged frame plus
-            ``BaseMetadata``.
-        """
-        return self.finalize(*self._combine_raw())
 
     @property
     def partial_frame(self) -> pd.DataFrame:
@@ -1669,7 +1626,7 @@ class ChunkedCall:
                 ) -> tuple[pd.DataFrame, httpx.Response]:
                     """One sub-request (with retry) + record + progress tick."""
                     result = await _retry(lambda: self.fetch(args), self.retry_policy)
-                    self.record(index, result)
+                    self._chunks[index] = result
                     if reporter is not None:
                         # Chunks finish out of order under gather, so tick the
                         # completed *count* rather than a positional index.
@@ -1710,7 +1667,10 @@ class ChunkedCall:
                     interrupted, exc = first_transient
                     raise interrupted from exc
 
-        return self.combined()
+        # Apply the injected ``finalize`` to the raw combined result.
+        # ``partial_frame`` / ``partial_response`` deliberately bypass
+        # ``finalize`` to stay cheap and side-effect-free.
+        return self.finalize(*self._combine_raw())
 
 
 def multi_value_chunked(

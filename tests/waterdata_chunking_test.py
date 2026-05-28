@@ -60,8 +60,8 @@ from dataretrieval.waterdata.utils import _DATE_RANGE_PARAMS, _construct_api_req
 
 
 def _aiozero(_d):
-    """An async no-op sleep — monkeypatched over ``chunking._ASLEEP`` so
-    retry backoff doesn't actually wait in tests."""
+    """An async no-op sleep — monkeypatched over the ``chunking`` module's
+    ``asyncio.sleep`` so retry backoff doesn't actually wait in tests."""
 
     async def _noop():
         return None
@@ -1489,7 +1489,7 @@ def test_combine_chunk_responses_does_not_mutate_input_urls():
 # ---------------------------------------------------------------------------
 # Retry-with-backoff: RetryPolicy + _retryable + drivers + decorator wiring.
 # Conftest pins API_USGS_RETRIES=0, so these tests opt in explicitly and
-# patch chunking._SLEEP / chunking._ASLEEP to no-ops (no real backoff).
+# patch the chunking module's ``asyncio.sleep`` to a no-op (no real backoff).
 # ---------------------------------------------------------------------------
 
 
@@ -1601,7 +1601,7 @@ def test_retryable_skips_wrapped_midpagination_transient():
 
 
 def test_retry_transient_then_recovers(monkeypatch):
-    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
     calls = {"n": 0}
 
     async def afn():
@@ -1616,7 +1616,7 @@ def test_retry_transient_then_recovers(monkeypatch):
 
 
 def test_retry_exhausted_reraises(monkeypatch):
-    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
     calls = {"n": 0}
 
     async def afn():
@@ -1635,7 +1635,7 @@ def test_retry_non_retryable_not_retried(monkeypatch):
         slept.append(delay)
         return _aiozero(delay)
 
-    monkeypatch.setattr(_chunking, "_ASLEEP", _record)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _record)
     calls = {"n": 0}
 
     async def afn():
@@ -1654,7 +1654,7 @@ def test_retry_long_retry_after_escalates(monkeypatch):
         slept.append(delay)
         return _aiozero(delay)
 
-    monkeypatch.setattr(_chunking, "_ASLEEP", _record)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _record)
     calls = {"n": 0}
 
     async def afn():
@@ -1673,7 +1673,7 @@ def test_retry_transient_then_success(monkeypatch):
     async def _noslept(_d):
         return None
 
-    monkeypatch.setattr(_chunking, "_ASLEEP", _noslept)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _noslept)
     calls = {"n": 0}
 
     async def afn():
@@ -1693,7 +1693,7 @@ def test_chunker_retries_transient_then_completes(monkeypatch):
     """A transient on one sub-request is retried transparently; the
     decorated call completes with no ChunkInterrupted."""
     monkeypatch.setenv("API_USGS_RETRIES", "3")
-    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
     state = {"failed": False}
 
     async def fetch(args):
@@ -1713,7 +1713,7 @@ def test_chunker_exhausted_retries_still_resumable(monkeypatch):
     """When retries are exhausted the failure still surfaces as a
     resumable ChunkInterrupted — retries don't swallow the escape hatch."""
     monkeypatch.setenv("API_USGS_RETRIES", "2")
-    monkeypatch.setattr(_chunking, "_ASLEEP", _aiozero)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
     attempts = {"n": 0}
 
     async def fetch(args):
@@ -1737,7 +1737,7 @@ def test_async_fan_out_retries_transient_then_completes(monkeypatch):
     async def _noslept(_d):
         return None
 
-    monkeypatch.setattr(_chunking, "_ASLEEP", _noslept)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _noslept)
     state = {"failed": False}
 
     async def fetch_async(args):
@@ -1759,7 +1759,7 @@ def test_async_fan_out_surfaces_fatal_over_transient(monkeypatch):
     async def _noslept(_d):
         return None
 
-    monkeypatch.setattr(_chunking, "_ASLEEP", _noslept)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _noslept)
 
     async def fetch_async(args):
         # One chunk carries a deterministic programmer error; the rest are
