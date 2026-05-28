@@ -31,6 +31,7 @@ import pytest
 if sys.version_info < (3, 10):
     pytest.skip("Skip entire module on Python < 3.10", allow_module_level=True)
 
+from dataretrieval.waterdata import _config
 from dataretrieval.waterdata import chunking as _chunking
 from dataretrieval.waterdata import utils as _utils
 from dataretrieval.waterdata.chunking import (
@@ -1552,7 +1553,7 @@ def test_retry_policy_from_env(monkeypatch):
     monkeypatch.setenv("API_USGS_RETRIES", "0")
     assert RetryPolicy.from_env().max_retries == 0
     monkeypatch.delenv("API_USGS_RETRIES", raising=False)
-    assert RetryPolicy.from_env().max_retries == _chunking._RETRIES_DEFAULT
+    assert RetryPolicy.from_env().max_retries == _config._RETRIES_DEFAULT
     monkeypatch.setenv("API_USGS_RETRIES", "-1")
     with pytest.raises(ValueError):
         RetryPolicy.from_env()
@@ -1570,13 +1571,21 @@ def test_retry_policy_rejects_invalid_settings():
         RetryPolicy(max_backoff=-1.0)
 
 
-def test_retry_policy_from_env_honors_monkeypatched_constants(monkeypatch):
-    # The timing knobs are read from the module constants at call time, so
-    # monkeypatching them (as the module comment promises) takes effect.
-    monkeypatch.setattr(_chunking, "_RETRY_MAX_BACKOFF", 0.0)
-    monkeypatch.setattr(_chunking, "_RETRY_BASE_BACKOFF", 0.0)
-    policy = RetryPolicy.from_env()
-    assert policy.max_backoff == 0.0 and policy.base_backoff == 0.0
+def test_retry_policy_override_takes_effect():
+    """A Python-side override is the highest-precedence config layer and
+    flows through ``RetryPolicy.from_env()`` for the duration of the block."""
+    from dataretrieval.waterdata._config import WaterDataConfig, override
+
+    custom = WaterDataConfig(
+        retry=RetryPolicy(base_backoff=0.0, max_backoff=0.0, max_retries=2)
+    )
+    with override(custom):
+        policy = RetryPolicy.from_env()
+        assert policy.base_backoff == 0.0
+        assert policy.max_backoff == 0.0
+        assert policy.max_retries == 2
+    # And the override unwinds at block exit.
+    assert RetryPolicy.from_env().base_backoff == _config._RETRY_BASE_BACKOFF
 
 
 # -- _retryable taxonomy ----------------------------------------------------

@@ -52,8 +52,6 @@ import copy
 import functools
 import itertools
 import math
-import os
-import random
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -108,197 +106,12 @@ _NEVER_CHUNK = frozenset(
 # Response header USGS uses to advertise remaining hourly quota.
 _QUOTA_HEADER = "x-ratelimit-remaining"
 
-# Fan-out concurrency cap, read at call time (not import) so test
-# ``monkeypatch.setenv`` applies. Value grammar in :func:`_read_concurrency_env`;
-# the concurrency model is in the module docstring.
-_CONCURRENCY_ENV = "API_USGS_CONCURRENT"
-_CONCURRENCY_DEFAULT = 16
-_CONCURRENCY_UNBOUNDED = "unbounded"
-
-
-def _read_concurrency_env() -> int | None:
-    """
-    Resolve the ``API_USGS_CONCURRENT`` env var to a parallelism cap.
-
-    Returns
-    -------
-    int or None
-        ``1`` for a single connection; an integer >1 for bounded
-        concurrency; ``None`` to disable the per-call cap entirely
-        (``unbounded`` keyword). Unset → default of
-        ``_CONCURRENCY_DEFAULT``.
-    """
-    raw = os.environ.get(_CONCURRENCY_ENV)
-    if raw is None:
-        return _CONCURRENCY_DEFAULT
-    raw = raw.strip()
-    if raw == "":
-        return _CONCURRENCY_DEFAULT
-    if raw.lower() == _CONCURRENCY_UNBOUNDED:
-        return None
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(
-            f"{_CONCURRENCY_ENV} must be a positive integer or "
-            f"'{_CONCURRENCY_UNBOUNDED}'; got {raw!r}."
-        ) from exc
-    if value < 1:
-        raise ValueError(
-            f"{_CONCURRENCY_ENV} must be >= 1 (got {value}); use "
-            f"'{_CONCURRENCY_UNBOUNDED}' to disable the cap."
-        )
-    return value
-
-
-# Retry-with-backoff defaults for transient sub-request failures (429 /
-# 5xx / connect-read timeouts): exponential backoff with full jitter, and
-# honor a server ``Retry-After`` up to the cap below before escalating
-# to a resumable interruption instead.
-_RETRIES_ENV = "API_USGS_RETRIES"
-_RETRIES_DEFAULT = 4
-_RETRY_BASE_BACKOFF = 0.5
-_RETRY_MAX_BACKOFF = 30.0
-_RETRY_AFTER_CAP = 60.0
-
-
-def _read_retries_env() -> int:
-    """
-    Resolve the ``API_USGS_RETRIES`` env var to a max-retry count.
-
-    Returns
-    -------
-    int
-        Number of retries after the first attempt; ``0`` disables
-        retrying. Unset/blank → ``_RETRIES_DEFAULT``.
-    """
-    raw = os.environ.get(_RETRIES_ENV)
-    if raw is None or raw.strip() == "":
-        return _RETRIES_DEFAULT
-    try:
-        value = int(raw.strip())
-    except ValueError as exc:
-        raise ValueError(
-            f"{_RETRIES_ENV} must be a non-negative integer (got {raw!r})."
-        ) from exc
-    if value < 0:
-        raise ValueError(f"{_RETRIES_ENV} must be >= 0 (got {value}).")
-    return value
-
-
-@dataclass(frozen=True)
-class RetryPolicy:
-    """Bounded retry-with-backoff config for transient sub-request failures.
-
-    An immutable value object that owns the *timing* decisions; the
-    exception taxonomy (which failures are retryable) lives in
-    :func:`_retryable`. Backoff is exponential with **full jitter**
-    (:func:`random.uniform` over ``[0, ceiling]``) so the concurrent
-    fan-out's retries don't re-burst in lockstep. A server ``Retry-After``
-    hint, when present, overrides the computed backoff — unless it exceeds
-    :attr:`retry_after_cap`, in which case retrying stops and the failure
-    surfaces as a resumable :class:`ChunkInterrupted` (a multi-minute
-    quota-window reset shouldn't block the call inline).
-
-    Attributes
-    ----------
-    max_retries : int
-        Retries attempted after the first try; ``0`` disables retrying.
-    base_backoff : float
-        Seconds; the jitter ceiling for the first retry, doubled each
-        subsequent attempt.
-    max_backoff : float
-        Upper bound on any single attempt's backoff ceiling.
-    retry_after_cap : float
-        Largest ``Retry-After`` (seconds) honored inline; longer hints
-        escalate to a resumable interruption.
-    """
-
-    max_retries: int = _RETRIES_DEFAULT
-    base_backoff: float = _RETRY_BASE_BACKOFF
-    max_backoff: float = _RETRY_MAX_BACKOFF
-    retry_after_cap: float = _RETRY_AFTER_CAP
-
-    def __post_init__(self) -> None:
-        # Catch invalid timing knobs here so a misconfiguration fails at
-        # construction, not deep in a later ``time.sleep`` (ValueError on
-        # a negative delay) or silently in ``asyncio.sleep`` (which
-        # treats negative as zero).
-        if self.max_retries < 0:
-            raise ValueError(f"max_retries must be >= 0 (got {self.max_retries}).")
-        if self.base_backoff < 0 or self.max_backoff < 0 or self.retry_after_cap < 0:
-            raise ValueError("retry backoff settings must be non-negative.")
-
-    @classmethod
-    def from_env(cls) -> RetryPolicy:
-        """
-        Build a policy from the module-level defaults, resolved now.
-
-        Reads ``max_retries`` from ``API_USGS_RETRIES`` and the timing
-        knobs from the ``_RETRY_*`` module constants at call time — not
-        the dataclass field defaults (which freeze at class definition)
-        — so test ``monkeypatch.setattr`` on the constants takes effect.
-
-        Returns
-        -------
-        RetryPolicy
-            A policy built from the module-level defaults resolved at
-            call time.
-        """
-        return cls(
-            max_retries=_read_retries_env(),
-            base_backoff=_RETRY_BASE_BACKOFF,
-            max_backoff=_RETRY_MAX_BACKOFF,
-            retry_after_cap=_RETRY_AFTER_CAP,
-        )
-
-    def should_retry(self, attempt: int, retry_after: float | None) -> bool:
-        """
-        Whether a just-failed ``attempt`` (1-based) warrants another try.
-
-        A ``Retry-After`` longer than ``retry_after_cap`` is *not* slept
-        off inline — it returns ``False`` so the failure escalates to a
-        resumable interruption instead of blocking the call for minutes.
-
-        Parameters
-        ----------
-        attempt : int
-            The just-failed attempt number (1-based).
-        retry_after : float or None
-            Seconds the server suggested waiting (``Retry-After`` hint),
-            or ``None`` when no hint was given.
-
-        Returns
-        -------
-        bool
-            ``True`` if another try is warranted, ``False`` otherwise.
-        """
-        if attempt > self.max_retries:
-            return False
-        return retry_after is None or retry_after <= self.retry_after_cap
-
-    def backoff(self, attempt: int, retry_after: float | None) -> float:
-        """
-        Seconds to wait before retry ``attempt`` (1-based).
-
-        Parameters
-        ----------
-        attempt : int
-            The retry attempt number (1-based).
-        retry_after : float or None
-            Seconds the server suggested waiting (``Retry-After`` hint),
-            or ``None`` to use the computed exponential backoff instead.
-
-        Returns
-        -------
-        float
-            Seconds to wait before the retry.
-        """
-        if retry_after is not None:
-            return retry_after
-        ceiling = min(self.max_backoff, self.base_backoff * 2 ** (attempt - 1))
-        return random.uniform(0.0, ceiling)
-
+# ``RetryPolicy`` and ``ConcurrencyPolicy`` are the value-object knobs the
+# chunker reads at call time. They live in :mod:`._config`, which layers
+# defaults → user file → local file → env vars → Python override (see that
+# module's docstring). Re-exported here so legacy callers / tests keep
+# ``from dataretrieval.waterdata.chunking import RetryPolicy`` working.
+from ._config import ConcurrencyPolicy, RetryPolicy  # noqa: E402
 
 # Default for direct ``ChunkedCall`` / ``ChunkPlan.execute`` construction
 # (and tests): no retrying. The production decorator path explicitly passes
@@ -1558,7 +1371,7 @@ class ChunkedCall:
             handle is on ``exc.call`` — wait for the underlying
             condition to clear and call ``exc.call.resume()`` again.
         """
-        concurrency = _read_concurrency_env()
+        concurrency = ConcurrencyPolicy.from_env().max_connections
         with start_blocking_portal() as portal:
             return portal.call(functools.partial(self._run, concurrency))
 

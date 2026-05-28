@@ -25,7 +25,6 @@ Jupyter/IPython kernel (like ``tqdm``) — while redirected logs and CI stay cle
 from __future__ import annotations
 
 import contextvars
-import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -80,13 +79,17 @@ def _in_jupyter_kernel() -> bool:
 def _enabled_default(stream: TextIO) -> bool:
     """Whether to draw the line by default.
 
-    ``API_USGS_PROGRESS`` wins when set. Otherwise show it for interactive use —
-    a TTY or a Jupyter/IPython kernel — and stay quiet for redirected output,
-    logs, and CI.
+    An explicit on/off from the layered config wins (set via
+    ``$API_USGS_PROGRESS``, a config file's ``[default] progress``, or a
+    Python override — see :mod:`._config`). Otherwise show it for
+    interactive use — a TTY or a Jupyter/IPython kernel — and stay quiet
+    for redirected output, logs, and CI.
     """
-    override = os.getenv("API_USGS_PROGRESS")
-    if override is not None:
-        return override.strip().lower() not in {"", "0", "false", "no", "off"}
+    from . import _config  # local import to avoid an import cycle at module load
+
+    explicit = _config.current().progress
+    if explicit is not None:
+        return explicit
     if _in_jupyter_kernel():
         return True
     return hasattr(stream, "isatty") and stream.isatty()
@@ -252,8 +255,10 @@ class ProgressReporter:
             self.enabled = False
 
     def _maybe_hint_api_key(self) -> None:
+        from . import _config  # local import to avoid an import cycle at module load
+
         global _api_key_hint_shown
-        if _api_key_hint_shown or os.getenv("API_USGS_PAT"):
+        if _api_key_hint_shown or _config.current().api_token:
             return
         # Set the once-per-process latch only after a successful write, so a
         # failed write (broken pipe) doesn't silently burn the hint for every
