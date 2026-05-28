@@ -1441,10 +1441,11 @@ class ChunkedCall:
         Frames concatenate in sub-args *index* order (``sorted`` keys —
         deterministic, independent of parallel completion order). The
         aggregated response takes its headers from the most-recently-
-        *completed* sub-request: ``record`` is the only writer of
-        ``self._chunks`` and ``dict`` preserves insertion order, so the
-        chunks' natural order is completion order and the last one carries
-        the freshest ``x-ratelimit-remaining``.
+        *completed* sub-request: the ``track`` closure in :meth:`_run`
+        is the only writer of ``self._chunks`` and ``dict`` preserves
+        insertion order, so the chunks' natural order is completion
+        order and the last one carries the freshest
+        ``x-ratelimit-remaining``.
 
         Returns
         -------
@@ -1624,7 +1625,7 @@ class ChunkedCall:
                 async def track(
                     index: int, args: dict[str, Any]
                 ) -> tuple[pd.DataFrame, httpx.Response]:
-                    """One sub-request (with retry) + record + progress tick."""
+                    """One sub-request (with retry) + result-store + progress tick."""
                     result = await _retry(lambda: self.fetch(args), self.retry_policy)
                     self._chunks[index] = result
                     if reporter is not None:
@@ -1667,9 +1668,6 @@ class ChunkedCall:
                     interrupted, exc = first_transient
                     raise interrupted from exc
 
-        # Apply the injected ``finalize`` to the raw combined result.
-        # ``partial_frame`` / ``partial_response`` deliberately bypass
-        # ``finalize`` to stay cheap and side-effect-free.
         return self.finalize(*self._combine_raw())
 
 
@@ -1713,9 +1711,9 @@ def multi_value_chunked(
     RequestTooLarge
         If no plan can fit ``url_limit``.
     ChunkInterrupted
-        On a mid-execution 429 (:class:`QuotaExhausted`) or 5xx
-        (:class:`ServiceInterrupted`). See :class:`ChunkedCall` for
-        the resume semantics.
+        On a mid-execution transient — 429, 5xx, or a bare transport
+        error: :class:`QuotaExhausted` for 429, :class:`ServiceInterrupted`
+        for the rest. See :class:`ChunkedCall` for the resume semantics.
 
     See Also
     --------

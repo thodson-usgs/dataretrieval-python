@@ -60,13 +60,24 @@ from dataretrieval.waterdata.utils import _DATE_RANGE_PARAMS, _construct_api_req
 
 
 def _aiozero(_d):
-    """An async no-op sleep — monkeypatched over the ``chunking`` module's
-    ``asyncio.sleep`` so retry backoff doesn't actually wait in tests."""
+    """An async no-op sleep — monkeypatched over ``asyncio.sleep`` (via
+    the chunking module's binding) so retry backoff doesn't wait in tests."""
 
     async def _noop():
         return None
 
     return _noop()
+
+
+def _recording_sleep(slept):
+    """An ``_aiozero`` variant that appends each requested delay to ``slept``
+    before resolving — for tests that need to assert what would have been waited."""
+
+    def _record(delay):
+        slept.append(delay)
+        return _aiozero(delay)
+
+    return _record
 
 
 class _FakeReq:
@@ -1487,7 +1498,7 @@ def test_combine_chunk_responses_does_not_mutate_input_urls():
 
 
 # ---------------------------------------------------------------------------
-# Retry-with-backoff: RetryPolicy + _retryable + drivers + decorator wiring.
+# Retry-with-backoff: RetryPolicy + _retryable + driver + decorator wiring.
 # Conftest pins API_USGS_RETRIES=0, so these tests opt in explicitly and
 # patch the chunking module's ``asyncio.sleep`` to a no-op (no real backoff).
 # ---------------------------------------------------------------------------
@@ -1631,11 +1642,7 @@ def test_retry_exhausted_reraises(monkeypatch):
 def test_retry_non_retryable_not_retried(monkeypatch):
     slept: list[float] = []
 
-    def _record(delay):
-        slept.append(delay)
-        return _aiozero(delay)
-
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _record)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _recording_sleep(slept))
     calls = {"n": 0}
 
     async def afn():
@@ -1650,11 +1657,7 @@ def test_retry_non_retryable_not_retried(monkeypatch):
 def test_retry_long_retry_after_escalates(monkeypatch):
     slept: list[float] = []
 
-    def _record(delay):
-        slept.append(delay)
-        return _aiozero(delay)
-
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _record)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _recording_sleep(slept))
     calls = {"n": 0}
 
     async def afn():
@@ -1670,10 +1673,7 @@ def test_retry_long_retry_after_escalates(monkeypatch):
 
 
 def test_retry_transient_then_success(monkeypatch):
-    async def _noslept(_d):
-        return None
-
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _noslept)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
     calls = {"n": 0}
 
     async def afn():
@@ -1734,10 +1734,7 @@ def test_async_fan_out_retries_transient_then_completes(monkeypatch):
     """The parallel path retries a transient sub-request and completes."""
     monkeypatch.setenv("API_USGS_RETRIES", "3")
 
-    async def _noslept(_d):
-        return None
-
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _noslept)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
     state = {"failed": False}
 
     async def fetch_async(args):
@@ -1756,10 +1753,7 @@ def test_async_fan_out_surfaces_fatal_over_transient(monkeypatch):
     being masked behind a resumable interruption from a transient sibling."""
     monkeypatch.setenv("API_USGS_RETRIES", "2")
 
-    async def _noslept(_d):
-        return None
-
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _noslept)
+    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
 
     async def fetch_async(args):
         # One chunk carries a deterministic programmer error; the rest are
