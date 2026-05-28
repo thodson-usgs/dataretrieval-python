@@ -153,10 +153,9 @@ def _read_concurrency_env() -> int | None:
 
 
 # Retry-with-backoff defaults for transient sub-request failures (429 /
-# 5xx / connect-read timeouts): 4 retries, 0.5s base doubling under full
-# jitter up to a 30s per-attempt ceiling, and honor a server
-# ``Retry-After`` up to 60s before escalating to a resumable interruption
-# instead.
+# 5xx / connect-read timeouts): exponential backoff with full jitter, and
+# honor a server ``Retry-After`` up to the cap below before escalating
+# to a resumable interruption instead.
 _RETRIES_ENV = "API_USGS_RETRIES"
 _RETRIES_DEFAULT = 4
 _RETRY_BASE_BACKOFF = 0.5
@@ -322,15 +321,14 @@ _chunked_client: ContextVar[httpx.AsyncClient | None] = ContextVar(
 @contextmanager
 def _publish(client: httpx.AsyncClient) -> Iterator[None]:
     """
-    Bind ``client`` to the ``_chunked_client`` ContextVar for the
-    duration of the ``with`` block (wrapping the set/reset token dance),
-    so the paginated-loop helpers can borrow the chunker's shared client
-    via :func:`get_active_client`.
+    Publish ``client`` on the ``_chunked_client`` ContextVar so the
+    paginated-loop helpers can borrow it via :func:`get_active_client`
+    for the duration of the ``with`` block.
 
     Parameters
     ----------
     client : httpx.AsyncClient
-        The client to publish on ``_chunked_client``.
+        The client to publish.
 
     Yields
     ------
@@ -348,11 +346,9 @@ def get_active_client() -> httpx.AsyncClient | None:
     """
     Return the chunker's currently-published client, or ``None``.
 
-    Public accessor for the ``_chunked_client`` ContextVar so
-    sibling modules (notably
-    :func:`dataretrieval.waterdata.utils._client_for`) don't have
-    to reach into the private ContextVar directly. Used by the
-    paginated-loop helpers to reuse the per-call connection pool.
+    Used by the paginated-loop helpers (e.g.
+    :func:`dataretrieval.waterdata.utils._client_for`) to reuse the
+    per-call connection pool.
 
     Returns
     -------
@@ -1493,19 +1489,18 @@ class ChunkedCall:
         """
         Combine every recorded sub-request and apply :attr:`finalize`.
 
-        The terminal *success* result: :meth:`_run` returns this, so a
-        completed call (first run or resume) yields the same shape
-        ``finalize`` produces — a raw ``(frame, httpx.Response)`` by
-        default, or the OGC getters' type-coerced / column-arranged frame
-        plus ``BaseMetadata``. The ``partial_*`` accessors deliberately do
-        NOT go through here — they return the raw :meth:`_combine_raw`
-        snapshot to stay cheap and side-effect-free.
+        Returned by :meth:`_run` on a completed call (first run or
+        resume). The ``partial_*`` accessors deliberately do NOT route
+        through here — they return the raw :meth:`_combine_raw` snapshot
+        to stay cheap and side-effect-free.
 
         Returns
         -------
         tuple of (pandas.DataFrame, finalized response)
-            The combined frame and the finalized aggregate response /
-            metadata that :attr:`finalize` produces.
+            The combined frame and whatever :attr:`finalize` produces —
+            a raw :class:`httpx.Response` by default, or the OGC
+            getters' type-coerced / column-arranged frame plus
+            ``BaseMetadata``.
         """
         return self.finalize(*self._combine_raw())
 
