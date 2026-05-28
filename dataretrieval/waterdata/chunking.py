@@ -222,10 +222,10 @@ class RetryPolicy:
     retry_after_cap: float = _RETRY_AFTER_CAP
 
     def __post_init__(self) -> None:
-        # Guard the value object's own invariants so a misconfiguration
-        # fails loudly at construction rather than as a downstream
-        # ``time.sleep`` ValueError (negative delay) or a silent
-        # asyncio.sleep-treats-negative-as-zero divergence.
+        # Catch invalid timing knobs here so a misconfiguration fails at
+        # construction, not deep in a later ``time.sleep`` (ValueError on
+        # a negative delay) or silently in ``asyncio.sleep`` (which
+        # treats negative as zero).
         if self.max_retries < 0:
             raise ValueError(f"max_retries must be >= 0 (got {self.max_retries}).")
         if self.base_backoff < 0 or self.max_backoff < 0 or self.retry_after_cap < 0:
@@ -236,10 +236,10 @@ class RetryPolicy:
         """
         Build a policy from the module-level defaults, resolved now.
 
-        ``max_retries`` comes from ``API_USGS_RETRIES``; the timing knobs
-        are read from the ``_RETRY_*`` module constants at call time (not
-        the dataclass field defaults, which freeze at class definition) so
-        ``monkeypatch.setattr`` on those constants takes effect.
+        Reads ``max_retries`` from ``API_USGS_RETRIES`` and the timing
+        knobs from the ``_RETRY_*`` module constants at call time — not
+        the dataclass field defaults (which freeze at class definition)
+        — so test ``monkeypatch.setattr`` on the constants takes effect.
 
         Returns
         -------
@@ -308,12 +308,11 @@ class RetryPolicy:
 _NO_RETRY = RetryPolicy(max_retries=0)
 
 
-# The single shared ``httpx.AsyncClient`` of an in-flight chunked call,
-# published (via :func:`_publish`) during ``ChunkedCall._run`` so the
-# paginated-loop helpers downstream (``_walk_pages``) reuse one
-# connection pool across every gathered sub-request of the call. ``None``
-# when not inside a chunked call — paginated helpers fall back to their
-# own short-lived client in that case.
+# Shared per-call ``httpx.AsyncClient``, published via :func:`_publish`
+# during ``ChunkedCall._run`` so paginated-loop helpers (``_walk_pages``)
+# reuse the same connection pool across every sub-request. ``None``
+# outside a chunked call — paginated helpers then open their own
+# short-lived client.
 _chunked_client: ContextVar[httpx.AsyncClient | None] = ContextVar(
     "_chunked_client", default=None
 )
@@ -676,13 +675,12 @@ def _set_response_url(response: httpx.Response, url: str | httpx.URL) -> None:
     Overwrite the URL surfaced by a response without back-propagating
     the change into any aliased original.
 
-    On real ``httpx.Response`` instances ``.url`` is a read-only
-    property that resolves through the bound request; rather than
-    mutate the existing request's URL (which would be visible through
-    any shallow copy that shares the same ``.request``), we replace
-    the response's request with a fresh :class:`httpx.Request` carrying
-    the new URL. On lightweight test mocks ``.url`` is a plain
-    writable attribute — that path is tried first.
+    Try the direct assignment first: on lightweight test mocks ``.url``
+    is a plain writable attribute. On real ``httpx.Response`` it's
+    read-only (it resolves through the bound request), so swap in a
+    fresh :class:`httpx.Request` carrying the new URL — mutating the
+    existing one would leak through any shallow copy that shares the
+    same ``.request``.
     """
     try:
         response.url = url  # type: ignore[misc]
@@ -1141,12 +1139,11 @@ def _retry_delay(exc: BaseException, attempt: int, policy: RetryPolicy) -> float
     Decide the backoff for a just-failed ``attempt`` (1-based), or ``None``
     to give up and re-raise.
 
-    Returns ``None`` when the error isn't a retryable transient, the policy
-    is exhausted, or the server's ``Retry-After`` is too long to absorb
-    inline (so it escalates to a resumable :class:`ChunkInterrupted`).
-    Otherwise returns the seconds to wait and emits the progress-bar retry
-    note. This is the whole retry *decision* — the sync and async drivers
-    share it and differ only in how they call the fetch and how they sleep.
+    Returns ``None`` in three cases — the error isn't a retryable
+    transient, the policy is exhausted, or the server's ``Retry-After``
+    exceeds the cap (escalates to a resumable :class:`ChunkInterrupted`
+    instead). Otherwise returns the seconds to wait and emits the
+    progress-bar retry note.
 
     Parameters
     ----------
@@ -1339,10 +1336,10 @@ class ChunkedCall:
     Stateful handle for a chunked call.
 
     Holds the in-flight state (per-sub-request frames and responses)
-    and the async fetcher, and exposes a single :meth:`resume` entry
-    point that drives the call from wherever it is to completion — used
-    both for the first invocation (from :meth:`ChunkPlan.execute`) and
-    for subsequent retries after a :class:`ChunkInterrupted`.
+    and the async fetcher. A single :meth:`resume` entry point drives
+    the call from wherever it is to completion — used both for the
+    first invocation (from :meth:`ChunkPlan.execute`) and for subsequent
+    retries after a :class:`ChunkInterrupted`.
 
     :meth:`_run` gathers every pending sub-request over one shared
     :class:`httpx.AsyncClient`, applies the failure-precedence rules, and
@@ -1553,10 +1550,10 @@ class ChunkedCall:
         """
         Yield ``(index, sub_args)`` for sub-requests not yet completed.
 
-        The single source of the "walk :meth:`ChunkPlan.iter_sub_args` in
-        deterministic order, skip any index already in ``self._chunks``"
-        rule that :meth:`_run` uses to decide *which* sub-requests it
-        still owes (first run and every resume alike).
+        Walks :meth:`ChunkPlan.iter_sub_args` in deterministic order
+        and skips any index already in ``self._chunks``. :meth:`_run`
+        uses this to pick up exactly the sub-requests it still owes —
+        first run and every resume alike.
 
         Yields
         ------
