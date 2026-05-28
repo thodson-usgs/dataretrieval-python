@@ -5,7 +5,6 @@ import functools
 import json
 import logging
 import numbers
-import os
 import re
 from collections.abc import (
     AsyncIterator,
@@ -27,7 +26,7 @@ from anyio.from_thread import start_blocking_portal
 
 from dataretrieval import __version__
 from dataretrieval.utils import HTTPX_DEFAULTS, BaseMetadata
-from dataretrieval.waterdata import _progress, chunking
+from dataretrieval.waterdata import _config, _progress, chunking
 from dataretrieval.waterdata.chunking import (
     _QUOTA_HEADER,
     RateLimited,
@@ -340,8 +339,10 @@ def _default_headers():
     -------
     dict
         A dictionary containing default headers including 'Accept-Encoding',
-        'Accept', 'User-Agent', and 'lang'. If the environment variable
-        'API_USGS_PAT' is set, its value is included as the 'X-Api-Key' header.
+        'Accept', 'User-Agent', and 'lang'. If an API token is configured
+        (via ``$API_USGS_PAT`` or any other config layer — see
+        :mod:`dataretrieval.waterdata._config`), it's included as the
+        ``X-Api-Key`` header.
     """
     headers = {
         "Accept-Encoding": "compress, gzip",
@@ -349,7 +350,7 @@ def _default_headers():
         "User-Agent": f"python-dataretrieval/{__version__}",
         "lang": "en-US",
     }
-    token = os.getenv("API_USGS_PAT")
+    token = _config.current().api_token
     if token:
         headers["X-Api-Key"] = token
     return headers
