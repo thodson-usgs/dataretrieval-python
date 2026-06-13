@@ -10,8 +10,8 @@
 Like the original R version
 [`dataRetrieval`](https://github.com/DOI-USGS/dataRetrieval), it retrieves major
 U.S. Geological Survey (USGS) hydrology data types available on the Web, as well
-as data from the Water Quality Portal (WQP) and Network Linked Data Index
-(NLDI).
+as data from the Water Quality Portal (WQP), the National Ground-Water
+Monitoring Network (NGWMN), and the Network Linked Data Index (NLDI).
 
 Check the [NEWS](NEWS.md) for all updates and announcements.
 
