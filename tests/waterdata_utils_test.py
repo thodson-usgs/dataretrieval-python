@@ -13,6 +13,7 @@ import dataretrieval.waterdata.stats as _stats_module
 import dataretrieval.waterdata.utils as _utils_module
 from dataretrieval.exceptions import DataRetrievalError, HTTPError, TransientError
 from dataretrieval.ogc.chunking import RateLimited, ServiceUnavailable
+from dataretrieval.waterdata import get_stats_date_range, get_stats_por
 from dataretrieval.waterdata.stats import _handle_nesting, get_data
 from dataretrieval.waterdata.utils import (
     OGC_API_URL,
@@ -910,3 +911,34 @@ def test_check_ogc_requests_raises_typed_on_5xx(httpx_mock):
 )
 def test_to_snake_case(name, expected):
     assert _to_snake_case(name) == expected
+
+
+def test_get_stats_por_forwards_normal_type(monkeypatch):
+    """``normal_type`` reaches the observationNormals request (parity with R's
+    ``read_waterdata_stats_por``). Guards against the param being dropped from
+    the forwarded args (e.g. accidentally added to ``_get_args``'s exclude)."""
+    captured: dict = {}
+
+    def fake_get_data(args, service, expand_percentiles, client=None):
+        captured.update(args=args, service=service)
+        return pd.DataFrame(), mock.Mock()
+
+    monkeypatch.setattr(_stats_module, "get_data", fake_get_data)
+    get_stats_por(monitoring_location_id="USGS-1", normal_type="MOY")
+    assert captured["service"] == "observationNormals"
+    assert captured["args"].get("normal_type") == "MOY"
+
+
+def test_get_stats_date_range_forwards_interval_type(monkeypatch):
+    """``interval_type`` (multi-value) reaches the observationIntervals request
+    (parity with R's ``read_waterdata_stats_daterange``)."""
+    captured: dict = {}
+
+    def fake_get_data(args, service, expand_percentiles, client=None):
+        captured.update(args=args, service=service)
+        return pd.DataFrame(), mock.Mock()
+
+    monkeypatch.setattr(_stats_module, "get_data", fake_get_data)
+    get_stats_date_range(monitoring_location_id="USGS-1", interval_type=["M", "CY"])
+    assert captured["service"] == "observationIntervals"
+    assert captured["args"].get("interval_type") == ["M", "CY"]

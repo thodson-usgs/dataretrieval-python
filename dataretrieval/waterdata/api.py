@@ -2453,6 +2453,7 @@ def get_stats_por(
     site_type_code: str | Iterable[str] | None = None,
     site_type_name: str | Iterable[str] | None = None,
     parameter_code: str | Iterable[str] | None = None,
+    normal_type: str | None = None,
     expand_percentiles: bool = True,
 ) -> tuple[pd.DataFrame, BaseMetadata]:
     """Get day-of-year and month-of-year water data statistics from the
@@ -2514,6 +2515,10 @@ def get_stats_por(
         measured and the units of measure. A complete list of parameter codes
         and associated groupings can be found at
         https://help.waterdata.usgs.gov/codes-and-parameters/parameters.
+    normal_type : string, optional
+        Filter the returned normals to a single period. If unspecified
+        (default), all matching data are returned. Available values:
+        "DOY" (day-of-year) and "MOY" (month-of-year).
     expand_percentiles : boolean
         Percentile data for a given day of year or month of year by default
         are returned from the service as lists of string values and percentile
@@ -2584,6 +2589,7 @@ def get_stats_date_range(
     site_type_code: str | Iterable[str] | None = None,
     site_type_name: str | Iterable[str] | None = None,
     parameter_code: str | Iterable[str] | None = None,
+    interval_type: str | Iterable[str] | None = None,
     expand_percentiles: bool = True,
 ) -> tuple[pd.DataFrame, BaseMetadata]:
     """Get monthly and annual water data statistics from the USGS Water Data API.
@@ -2649,6 +2655,10 @@ def get_stats_date_range(
         measured and the units of measure. A complete list of parameter codes
         and associated groupings can be found at
         https://help.waterdata.usgs.gov/codes-and-parameters/parameters.
+    interval_type : string or iterable of strings, optional
+        Filter the returned intervals to one or more periods. If unspecified
+        (default), all matching data are returned. Available values:
+        "M" (month), "CY" (calendar year), and "WY" (water year).
     expand_percentiles : boolean
         Percentile data for a given day of year or month of year by default
         are returned from the service as lists of string values and percentile
