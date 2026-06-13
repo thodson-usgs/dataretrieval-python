@@ -19,7 +19,9 @@ imported on demand: ``from dataretrieval import nldi``.
 
 A failed request raises a subclass of :class:`dataretrieval.DataRetrievalError`
 (the taxonomy lives in ``dataretrieval.exceptions``); connection-level failures
-(timeouts, DNS) are wrapped as :class:`dataretrieval.NetworkError`.
+(timeouts, DNS) are wrapped as :class:`dataretrieval.NetworkError`. A large
+request interrupted mid-stream raises :class:`dataretrieval.ChunkInterrupted`,
+whose ``.call.resume()`` continues from the work already completed.
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -40,6 +42,18 @@ from dataretrieval.exceptions import (
     TransientError,
     Unchunkable,
     URLTooLong,
+)
+
+# Resumable chunk-interruption exceptions. They are defined in
+# ``dataretrieval.ogc.chunking`` rather than ``dataretrieval.exceptions``
+# because they carry pandas/httpx state and a resumable ``ChunkedCall`` handle,
+# which would pull heavy dependencies into the lightweight exceptions module.
+# Surfaced here so callers get a stable public path:
+# ``from dataretrieval import ChunkInterrupted``.
+from dataretrieval.ogc.chunking import (
+    ChunkInterrupted,
+    QuotaExhausted,
+    ServiceInterrupted,
 )
 
 from . import (
@@ -77,5 +91,9 @@ __all__ = [
     "TransientError",
     "URLTooLong",
     "Unchunkable",
+    # resumable chunk-interruption exceptions (defined in ogc.chunking)
+    "ChunkInterrupted",
+    "QuotaExhausted",
+    "ServiceInterrupted",
     "__version__",
 ]

@@ -443,7 +443,7 @@ class ChunkInterrupted(DataRetrievalError):
     .. code-block:: python
 
         import time
-        from dataretrieval.ogc.chunking import ChunkInterrupted
+        from dataretrieval import ChunkInterrupted
 
         # ``getter`` is any chunked OGC getter — e.g.
         # ``waterdata.get_daily`` or ``ngwmn.get_water_level``.

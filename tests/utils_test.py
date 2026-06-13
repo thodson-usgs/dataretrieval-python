@@ -195,6 +195,25 @@ class Test_error_taxonomy:
 
         assert dataretrieval.DataRetrievalError is exceptions.DataRetrievalError
 
+    def test_chunk_interruptions_exported_at_top_level(self):
+        """The resumable chunk-interruption exceptions are reachable from the
+        top level (``from dataretrieval import ChunkInterrupted``) instead of
+        only the internal ``dataretrieval.ogc.chunking`` module, and resolve to
+        the same classes."""
+        import dataretrieval
+        from dataretrieval.ogc import chunking
+
+        for name in ("ChunkInterrupted", "QuotaExhausted", "ServiceInterrupted"):
+            assert getattr(dataretrieval, name) is getattr(chunking, name)
+            assert name in dataretrieval.__all__
+        assert issubclass(dataretrieval.QuotaExhausted, dataretrieval.ChunkInterrupted)
+        assert issubclass(
+            dataretrieval.ServiceInterrupted, dataretrieval.ChunkInterrupted
+        )
+        assert issubclass(
+            dataretrieval.ChunkInterrupted, dataretrieval.DataRetrievalError
+        )
+
 
 class Test_BaseMetadata:
     """Tests of BaseMetadata"""
