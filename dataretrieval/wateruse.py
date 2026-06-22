@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pandas as pd
 
+from dataretrieval.exceptions import DataRetrievalError
 from dataretrieval.utils import (
     HTTPX_DEFAULTS,
     BaseMetadata,
@@ -202,8 +203,13 @@ def _fetch_all_pages(
     headers = _default_headers()
     frame, first_response = _fetch_page(WATERUSE_URL, params, headers, ssl_check)
     frames = [frame]
+    # Guard against a non-advancing or cyclic ``next`` cursor (a server bug
+    # would otherwise spin this loop forever, accumulating frames until OOM):
+    # stop if a page points back to a URL we have already fetched.
+    seen: set[str] = set()
     next_url = _next_page_url(first_response)
-    while next_url is not None:
+    while next_url is not None and next_url not in seen:
+        seen.add(next_url)
         frame, response = _fetch_page(next_url, None, headers, ssl_check)
         frames.append(frame)
         next_url = _next_page_url(response)
@@ -222,7 +228,15 @@ def _fetch_page(
     )
     _raise_for_status(response, detail_from=_nwdc_error_detail)
     logger.debug("Requested water-use page: %s", response.url)
-    frame = pd.read_csv(io.BytesIO(response.content), dtype={_HUC12_COLUMN: str})
+    try:
+        frame = pd.read_csv(io.BytesIO(response.content), dtype={_HUC12_COLUMN: str})
+    except pd.errors.EmptyDataError as exc:
+        # NWDC normally signals "no data" with a 400 (handled above) or rows of
+        # zeros, never an empty body — but keep the typed-error contract if it
+        # ever returns one rather than leaking a bare pandas exception.
+        raise DataRetrievalError(
+            f"NWDC returned an empty response body (URL: {response.url})."
+        ) from exc
     return frame, response
 
 

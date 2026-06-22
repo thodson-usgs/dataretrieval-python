@@ -170,6 +170,36 @@ def test_http_error_raises_typed_exception_with_detail(httpx_mock):
         get_wateruse(model="bad-model", location="stateCd:RI")
 
 
+def test_empty_response_body_raises_typed_error(httpx_mock):
+    """An empty 200 body becomes a typed error, not a bare pandas EmptyDataError."""
+    httpx_mock.add_response(method="GET", url=WU_RE, text="")
+
+    with pytest.raises(dataretrieval.DataRetrievalError, match="empty response"):
+        get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+
+
+def test_cyclic_next_link_terminates(httpx_mock):
+    """A non-advancing/cyclic ``next`` cursor must not loop forever."""
+    # Page 1 points to a "next" URL; page 2 points back to that SAME URL.
+    cyclic = (
+        "<https://api.water.usgs.gov/nwaa-data/data"
+        '?model=wu-public-supply-wd&skip=2>; rel="next"'
+    )
+    httpx_mock.add_response(
+        method="GET", url=WU_RE, text=_CSV_P1, headers={"link": cyclic}
+    )
+    httpx_mock.add_response(
+        method="GET", url=WU_RE, text=_CSV_P2, headers={"link": cyclic}
+    )
+
+    df, _ = get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+
+    # Fetches page 1 + the cyclic page once, then breaks on the repeat — it must
+    # return (not hang) with the two pages collected.
+    assert len(df) == 3
+    assert len(httpx_mock.get_requests()) == 2
+
+
 def test_uses_shared_default_headers(httpx_mock):
     """Requests carry the shared dataretrieval User-Agent (per _default_headers)."""
     httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_PAGE)
