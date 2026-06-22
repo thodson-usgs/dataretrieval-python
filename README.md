@@ -181,7 +181,7 @@ from dataretrieval import wateruse
 df, metadata = wateruse.get_wateruse(
     model='wu-public-supply-wd',
     variable=['pswdtot', 'pswdgw', 'pswdsw'],
-    location='stateCd:RI',
+    state='RI',  # full name ('Rhode Island') or FIPS ('44') also work
     startdate='2020-01',
     timeres='monthly',
 )

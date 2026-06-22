@@ -13,7 +13,7 @@ import pytest
 import dataretrieval
 from dataretrieval import wateruse
 from dataretrieval.utils import BaseMetadata
-from dataretrieval.wateruse import _next_page_url, get_wateruse
+from dataretrieval.wateruse import _next_page_url, _resolve_location, get_wateruse
 
 # Match the NWDC endpoint regardless of query string, so assertions can drill
 # into the captured params without coupling registration to param order.
@@ -46,7 +46,7 @@ def test_get_wateruse_single_page(httpx_mock):
     df, md = get_wateruse(
         model="wu-public-supply-wd",
         variable=["pswdtot", "pswdgw", "pswdsw"],
-        location="stateCd:RI",
+        state="RI",
         startdate="2020-01",
         timeres="monthly",
     )
@@ -67,7 +67,7 @@ def test_huc12_id_kept_as_string_with_leading_zero(httpx_mock):
     """The HUC12 identifier must not be coerced to int (leading zeros matter)."""
     httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_PAGE)
 
-    df, _ = get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+    df, _ = get_wateruse(model="wu-public-supply-wd", state="RI")
 
     # String-typed (object or the pandas StringDtype, depending on version),
     # never coerced to int — the leading zero must survive.
@@ -82,7 +82,7 @@ def test_variables_are_comma_joined(httpx_mock):
     get_wateruse(
         model="wu-public-supply-wd",
         variable=["pswdtot", "pswdgw", "pswdsw"],
-        location="stateCd:RI",
+        state="RI",
     )
 
     qs = parse_qs(urlsplit(str(httpx_mock.get_requests()[0].url)).query)
@@ -94,7 +94,7 @@ def test_unset_params_are_dropped(httpx_mock):
     """Params left as None are omitted (the service rejects empty values)."""
     httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_PAGE)
 
-    get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+    get_wateruse(model="wu-public-supply-wd", state="RI")
 
     qs = parse_qs(urlsplit(str(httpx_mock.get_requests()[0].url)).query)
     assert "enddate" not in qs
@@ -120,7 +120,7 @@ def test_pagination_follows_link_header_and_concatenates(httpx_mock):
     )
     httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_P2)
 
-    df, _ = get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+    df, _ = get_wateruse(model="wu-public-supply-wd", state="RI")
 
     # 2 rows from page 1 + 1 row from page 2, reindexed.
     assert len(df) == 3
@@ -151,7 +151,7 @@ def test_pagination_rewrites_bare_host(httpx_mock):
     )
     httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_P2)
 
-    get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+    get_wateruse(model="wu-public-supply-wd", state="RI")
 
     second = httpx_mock.get_requests()[1]
     assert second.url.host == "api.water.usgs.gov"
@@ -167,7 +167,7 @@ def test_http_error_raises_typed_exception_with_detail(httpx_mock):
     )
 
     with pytest.raises(dataretrieval.DataRetrievalError, match="Invalid model name"):
-        get_wateruse(model="bad-model", location="stateCd:RI")
+        get_wateruse(model="bad-model", state="RI")
 
 
 def test_empty_response_body_raises_typed_error(httpx_mock):
@@ -175,7 +175,7 @@ def test_empty_response_body_raises_typed_error(httpx_mock):
     httpx_mock.add_response(method="GET", url=WU_RE, text="")
 
     with pytest.raises(dataretrieval.DataRetrievalError, match="empty response"):
-        get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+        get_wateruse(model="wu-public-supply-wd", state="RI")
 
 
 def test_cyclic_next_link_terminates(httpx_mock):
@@ -192,7 +192,7 @@ def test_cyclic_next_link_terminates(httpx_mock):
         method="GET", url=WU_RE, text=_CSV_P2, headers={"link": cyclic}
     )
 
-    df, _ = get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+    df, _ = get_wateruse(model="wu-public-supply-wd", state="RI")
 
     # Fetches page 1 + the cyclic page once, then breaks on the repeat — it must
     # return (not hang) with the two pages collected.
@@ -204,10 +204,64 @@ def test_uses_shared_default_headers(httpx_mock):
     """Requests carry the shared dataretrieval User-Agent (per _default_headers)."""
     httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_PAGE)
 
-    get_wateruse(model="wu-public-supply-wd", location="stateCd:RI")
+    get_wateruse(model="wu-public-supply-wd", state="RI")
 
     sent = httpx_mock.get_requests()[0]
     assert sent.headers["User-Agent"].startswith("python-dataretrieval/")
+
+
+def test_state_selector_builds_location_query(httpx_mock):
+    """``state=`` is resolved to the wire ``location=stateCd:<postal>`` param."""
+    httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_PAGE)
+
+    get_wateruse(model="wu-public-supply-wd", state="Rhode Island")
+
+    qs = parse_qs(urlsplit(str(httpx_mock.get_requests()[0].url)).query)
+    assert qs["location"] == ["stateCd:RI"]
+
+
+# --- _resolve_location unit tests (no HTTP) --------------------------------
+
+
+def test_resolve_location_state_accepts_name_postal_fips():
+    # All three encodings normalize to the two-letter postal code stateCd wants.
+    assert _resolve_location("Rhode Island", None, None) == "stateCd:RI"
+    assert _resolve_location("ri", None, None) == "stateCd:RI"
+    assert _resolve_location("44", None, None) == "stateCd:RI"
+    assert _resolve_location(44, None, None) == "stateCd:RI"
+
+
+def test_resolve_location_county_five_digit_fips():
+    assert _resolve_location(None, "55025", None) == "countyCd:55025"
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("04", "huc2:04"),
+        ("0109", "huc4:0109"),
+        ("07070005", "huc8:07070005"),
+        ("010900020502", "huc12:010900020502"),
+    ],
+)
+def test_resolve_location_huc_level_from_length(code, expected):
+    assert _resolve_location(None, None, code) == expected
+
+
+def test_resolve_location_requires_exactly_one():
+    with pytest.raises(ValueError, match="exactly one"):
+        _resolve_location(None, None, None)
+    with pytest.raises(ValueError, match="exactly one"):
+        _resolve_location("RI", "55025", None)
+
+
+def test_resolve_location_rejects_malformed_selectors():
+    with pytest.raises(ValueError):  # unrecognized state
+        _resolve_location("Atlantis", None, None)
+    with pytest.raises(ValueError, match="five-digit"):  # county not 5 digits
+        _resolve_location(None, "025", None)
+    with pytest.raises(ValueError, match="hydrologic unit"):  # odd-length huc
+        _resolve_location(None, None, "123")
 
 
 # --- _next_page_url unit tests (no HTTP) -----------------------------------

@@ -30,7 +30,7 @@ Examples
     df, md = wateruse.get_wateruse(
         model="wu-public-supply-wd",
         variable=["pswdtot", "pswdgw", "pswdsw"],
-        location="stateCd:RI",
+        state="RI",
         startdate="2020-01",
         timeres="monthly",
     )
@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pandas as pd
 
+from dataretrieval.codes.states import to_state
 from dataretrieval.exceptions import DataRetrievalError
 from dataretrieval.utils import (
     HTTPX_DEFAULTS,
@@ -84,7 +85,9 @@ _HUC12_COLUMN = "huc12_id"
 def get_wateruse(
     model: str,
     variable: str | Iterable[str] | None = None,
-    location: str | None = None,
+    state: str | int | None = None,
+    county: str | None = None,
+    huc: str | None = None,
     timeres: str | None = None,
     startdate: str | None = None,
     enddate: str | None = None,
@@ -95,11 +98,12 @@ def get_wateruse(
     """Get USGS water-use data from the NWDC web service.
 
     Retrieves modeled water-use estimates from the USGS National Water
-    Availability Assessment Data Companion. A single ``location`` is queried at
-    a time; results are always returned on a HUC12 grid, in a long (tidy) frame
-    with one row per HUC12 and time step. Large areas (e.g. ``"huc2:04"`` or a
-    populous state) are served across multiple pages, which this function
-    follows transparently and concatenates into one frame.
+    Availability Assessment Data Companion. A single area — given as exactly one
+    of ``state``, ``county``, or ``huc`` — is queried at a time; results are
+    always returned on a HUC12 grid, in a long (tidy) frame with one row per
+    HUC12 and time step. Large areas (e.g. a whole region or a populous state)
+    are served across multiple pages, which this function follows transparently
+    and concatenates into one frame.
 
     Parameters
     ----------
@@ -113,11 +117,21 @@ def get_wateruse(
         groundwater and surface-water components). Multiple variables are
         comma-joined into a single request. If omitted, the service returns its
         default variable set for the model.
-    location : string, optional
-        The area to query, given as ``"<type>:<id>"``. Supported types are
-        ``huc2``, ``huc4``, ``huc6``, ``huc8``, ``huc10``, ``huc12``,
-        ``countyCd``, and ``stateCd`` (e.g. ``"stateCd:RI"``, ``"huc2:04"``,
-        ``"countyCd:55025"``). Only one location may be queried per call.
+    state : string or int, optional
+        A single US state/territory to query. Accepts a full name
+        (``"Wisconsin"``), a two-letter postal code (``"WI"``), or a two-digit
+        ANSI/FIPS code (``"55"`` or ``55``), mirroring
+        :func:`dataretrieval.ngwmn.get_sites`.
+    county : string, optional
+        A single five-digit county FIPS code — state FIPS + county FIPS, e.g.
+        ``"55025"`` for Dane County, Wisconsin.
+    huc : string, optional
+        A single hydrologic unit code. The level is taken from the code's
+        length: a 2-digit code queries a HUC2 region, 8-digit a HUC8 subbasin,
+        12-digit a single HUC12, and so on (even lengths 2-12, e.g. ``"04"``,
+        ``"07070005"``, ``"010900020502"``).
+
+        Provide exactly one of ``state``, ``county``, or ``huc``.
     timeres : string, optional
         Temporal resolution: ``"monthly"``, ``"annualcy"`` (annual, calendar
         year), or ``"annualwy"`` (annual, water year). See
@@ -128,7 +142,7 @@ def get_wateruse(
     enddate : string, optional
         End of the query window, in the same format as ``startdate``.
     intersection : string, optional
-        How to select HUC12s that straddle the ``location`` boundary:
+        How to select HUC12s that straddle the queried-area boundary:
         ``"overlap"`` (any overlap, the default) or ``"envelop"`` (fully
         enclosed).
     limit : int, optional
@@ -151,6 +165,10 @@ def get_wateruse(
 
     Raises
     ------
+    ValueError
+        If not exactly one of ``state``, ``county``, or ``huc`` is given, or a
+        given selector is malformed (an unrecognized state, a county code that
+        is not five digits, or a HUC of invalid length).
     DataRetrievalError
         On an HTTP error response, the typed subclass for the status (see
         :func:`dataretrieval.exceptions.error_for_status`); or
@@ -166,7 +184,7 @@ def get_wateruse(
         >>> df, md = wateruse.get_wateruse(
         ...     model="wu-public-supply-wd",
         ...     variable=["pswdtot", "pswdgw", "pswdsw"],
-        ...     location="stateCd:RI",
+        ...     state="RI",
         ...     startdate="2020-01",
         ...     timeres="monthly",
         ... )
@@ -176,7 +194,7 @@ def get_wateruse(
         "format": "csv",
         "model": model,
         "variable": to_str(variable),
-        "location": location,
+        "location": _resolve_location(state, county, huc),
         "timeres": timeres,
         "startdate": startdate,
         "enddate": enddate,
@@ -188,6 +206,55 @@ def get_wateruse(
 
     df, first_response = _fetch_all_pages(params, ssl_check=ssl_check)
     return df, BaseMetadata(first_response)
+
+
+# Valid HUC code lengths (digits) → the hydrologic-unit level they query.
+_HUC_LENGTHS = (2, 4, 6, 8, 10, 12)
+
+
+def _resolve_location(
+    state: str | int | None, county: str | None, huc: str | None
+) -> str:
+    """Build the NWDC ``location=<type>:<id>`` value from the friendly selectors.
+
+    Exactly one of ``state`` / ``county`` / ``huc`` must be given (the service
+    queries one area per call). ``state`` is normalized to its two-letter
+    postal code (the form ``stateCd`` requires); ``county`` is a five-digit FIPS
+    code; and a ``huc`` code's length selects its level (``huc2`` … ``huc12``).
+    """
+    provided = [
+        name
+        for name, value in (("state", state), ("county", county), ("huc", huc))
+        if value is not None
+    ]
+    if len(provided) != 1:
+        raise ValueError(
+            "Specify exactly one of state, county, or huc "
+            f"(got: {', '.join(provided) or 'none'})."
+        )
+
+    if state is not None:
+        postal = to_state(state, to="postal")
+        if not isinstance(postal, str):
+            raise ValueError("Only one state may be queried per call.")
+        return f"stateCd:{postal}"
+
+    if county is not None:
+        code = str(county).strip()
+        if not (code.isdigit() and len(code) == 5):
+            raise ValueError(
+                "county must be a five-digit state+county FIPS code "
+                f"(e.g. '55025'), got {county!r}."
+            )
+        return f"countyCd:{code}"
+
+    code = str(huc).strip()
+    if not (code.isdigit() and len(code) in _HUC_LENGTHS):
+        raise ValueError(
+            "huc must be a hydrologic unit code of even length 2-12 digits "
+            f"(e.g. '04', '07070005', '010900020502'), got {huc!r}."
+        )
+    return f"huc{len(code)}:{code}"
 
 
 def _fetch_all_pages(
