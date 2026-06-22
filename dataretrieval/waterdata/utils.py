@@ -37,7 +37,6 @@ from dataretrieval.ogc.engine import (
     _check_ogc_requests,
     _construct_api_requests,
     _construct_cql_request,
-    _default_headers,
     _next_req_url,
     _normalize_str_iterable,
     _paginate,
@@ -65,7 +64,7 @@ from dataretrieval.ogc.shaping import (
 from dataretrieval.ogc.shaping import (
     _finalize_ogc as _engine_finalize_ogc,
 )
-from dataretrieval.utils import BaseMetadata
+from dataretrieval.utils import BaseMetadata, _default_headers
 from dataretrieval.waterdata.types import (
     PROFILE_LOOKUP,
     PROFILES,

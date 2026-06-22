@@ -4,6 +4,7 @@ Useful utilities for data munging.
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Iterable
 from typing import Any
@@ -27,6 +28,35 @@ HTTPX_DEFAULTS: dict[str, Any] = {
     "follow_redirects": True,
     "timeout": httpx.Timeout(60.0, connect=10.0),
 }
+
+
+def _default_headers() -> dict[str, str]:
+    """Build the default HTTP headers for a USGS web-API request.
+
+    Always sets a descriptive ``User-Agent`` plus ``Accept`` /
+    ``Accept-Encoding`` and ``lang``. If the ``API_USGS_PAT`` environment
+    variable is set, its value is added as the ``X-Api-Key`` header — a USGS
+    personal access token raises the request rate limit.
+
+    Shared by the OGC engine (:mod:`dataretrieval.ogc`), the Water Data getters
+    (:mod:`dataretrieval.waterdata`), and :mod:`dataretrieval.wateruse`, so the
+    request identity is consistent across every USGS API the package talks to.
+
+    Returns
+    -------
+    dict[str, str]
+        Headers suitable for an ``httpx`` request against a USGS API.
+    """
+    headers = {
+        "Accept-Encoding": "compress, gzip",
+        "Accept": "application/json",
+        "User-Agent": f"python-dataretrieval/{dataretrieval.__version__}",
+        "lang": "en-US",
+    }
+    token = os.getenv("API_USGS_PAT")
+    if token:
+        headers["X-Api-Key"] = token
+    return headers
 
 
 def to_str(listlike: object, delimiter: str = ",") -> str | None:

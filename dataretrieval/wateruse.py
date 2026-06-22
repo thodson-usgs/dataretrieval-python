@@ -12,7 +12,7 @@ Unlike the main Water Data getters (:mod:`dataretrieval.waterdata`) and NGWMN
 (:mod:`dataretrieval.ngwmn`), the NWDC is a plain CSV REST service rather than
 an OGC API Features collection, so this module talks to it directly instead of
 delegating to the shared OGC engine. It still follows the same conventions:
-shared request headers (:func:`~dataretrieval.ogc.engine._default_headers`),
+shared request headers (:func:`~dataretrieval.utils._default_headers`),
 the typed :class:`~dataretrieval.exceptions.DataRetrievalError` taxonomy, and a
 ``(DataFrame, BaseMetadata)`` return.
 
@@ -47,8 +47,13 @@ import httpx
 import pandas as pd
 
 from dataretrieval.exceptions import error_for_status
-from dataretrieval.ogc.engine import _default_headers
-from dataretrieval.utils import HTTPX_DEFAULTS, BaseMetadata, _get, to_str
+from dataretrieval.utils import (
+    HTTPX_DEFAULTS,
+    BaseMetadata,
+    _default_headers,
+    _get,
+    to_str,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

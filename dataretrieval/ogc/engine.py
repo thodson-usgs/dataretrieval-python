@@ -29,7 +29,6 @@ import functools
 import json
 import logging
 import numbers
-import os
 import re
 from collections.abc import (
     AsyncIterator,
@@ -49,7 +48,6 @@ import httpx
 import pandas as pd
 from anyio.from_thread import start_blocking_portal
 
-from dataretrieval import __version__
 from dataretrieval.exceptions import DataRetrievalError
 from dataretrieval.ogc import chunking
 from dataretrieval.ogc import progress as _progress
@@ -61,7 +59,13 @@ from dataretrieval.ogc.dates import _DATE_RANGE_PARAMS, _format_api_dates
 from dataretrieval.ogc.errors import _paginated_failure_message, _raise_for_non_200
 from dataretrieval.ogc.planning import _safe_elapsed
 from dataretrieval.ogc.shaping import GEOPANDAS, _finalize_ogc, _get_resp_data
-from dataretrieval.utils import HTTPX_DEFAULTS, BaseMetadata, _get, _network_error
+from dataretrieval.utils import (
+    HTTPX_DEFAULTS,
+    BaseMetadata,
+    _default_headers,
+    _get,
+    _network_error,
+)
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -240,29 +244,6 @@ def _cql2_param(args: dict[str, Any]) -> str:
     query = {"op": "and", "args": filters}
 
     return json.dumps(query, separators=(",", ":"))
-
-
-def _default_headers() -> dict[str, str]:
-    """
-    Generate default HTTP headers for API requests.
-
-    Returns
-    -------
-    dict
-        A dictionary containing default headers including 'Accept-Encoding',
-        'Accept', 'User-Agent', and 'lang'. If the environment variable
-        'API_USGS_PAT' is set, its value is included as the 'X-Api-Key' header.
-    """
-    headers = {
-        "Accept-Encoding": "compress, gzip",
-        "Accept": "application/json",
-        "User-Agent": f"python-dataretrieval/{__version__}",
-        "lang": "en-US",
-    }
-    token = os.getenv("API_USGS_PAT")
-    if token:
-        headers["X-Api-Key"] = token
-    return headers
 
 
 def _check_ogc_requests(endpoint: str, req_type: str = "queryables") -> dict[str, Any]:
