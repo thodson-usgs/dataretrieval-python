@@ -41,7 +41,8 @@ from __future__ import annotations
 
 import io
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterable
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -56,9 +57,6 @@ from dataretrieval.utils import (
     _raise_for_status,
     to_str,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +83,9 @@ _HUC12_COLUMN = "huc12_id"
 def get_wateruse(
     model: str,
     variable: str | Iterable[str] | None = None,
-    state: str | int | None = None,
-    county: str | None = None,
-    huc: str | None = None,
+    state: str | int | Iterable[str | int] | None = None,
+    county: str | Iterable[str] | None = None,
+    huc: str | Iterable[str] | None = None,
     timeres: str | None = None,
     startdate: str | None = None,
     enddate: str | None = None,
@@ -98,12 +96,16 @@ def get_wateruse(
     """Get USGS water-use data from the NWDC web service.
 
     Retrieves modeled water-use estimates from the USGS National Water
-    Availability Assessment Data Companion. A single area — given as exactly one
-    of ``state``, ``county``, or ``huc`` — is queried at a time; results are
-    always returned on a HUC12 grid, in a long (tidy) frame with one row per
-    HUC12 and time step. Large areas (e.g. a whole region or a populous state)
-    are served across multiple pages, which this function follows transparently
-    and concatenates into one frame.
+    Availability Assessment Data Companion. The area is given as exactly one of
+    ``state``, ``county``, or ``huc``; results are always returned on a HUC12
+    grid, in a long (tidy) frame with one row per HUC12 and time step. Large
+    areas (e.g. a whole region or a populous state) are served across multiple
+    pages, which this function follows transparently and concatenates into one
+    frame.
+
+    Each selector also accepts a list of values. The NWDC queries one area per
+    request, so a list is fanned out into one request per value and the results
+    are concatenated — convenient, but proportionally slower for many areas.
 
     Parameters
     ----------
@@ -117,21 +119,22 @@ def get_wateruse(
         groundwater and surface-water components). Multiple variables are
         comma-joined into a single request. If omitted, the service returns its
         default variable set for the model.
-    state : string or int, optional
-        A single US state/territory to query. Accepts a full name
+    state : string, int, or iterable, optional
+        One or more US states/territories to query. Each accepts a full name
         (``"Wisconsin"``), a two-letter postal code (``"WI"``), or a two-digit
         ANSI/FIPS code (``"55"`` or ``55``), mirroring
         :func:`dataretrieval.ngwmn.get_sites`.
-    county : string, optional
-        A single five-digit county FIPS code — state FIPS + county FIPS, e.g.
-        ``"55025"`` for Dane County, Wisconsin.
-    huc : string, optional
-        A single hydrologic unit code. The level is taken from the code's
+    county : string or iterable, optional
+        One or more five-digit county FIPS codes — state FIPS + county FIPS,
+        e.g. ``"55025"`` for Dane County, Wisconsin.
+    huc : string or iterable, optional
+        One or more hydrologic unit codes. Each code's level is taken from its
         length: a 2-digit code queries a HUC2 region, 8-digit a HUC8 subbasin,
         12-digit a single HUC12, and so on (even lengths 2-12, e.g. ``"04"``,
         ``"07070005"``, ``"010900020502"``).
 
-        Provide exactly one of ``state``, ``county``, or ``huc``.
+        Provide exactly one of ``state``, ``county``, or ``huc`` (each may be a
+        single value or a list).
     timeres : string, optional
         Temporal resolution: ``"monthly"``, ``"annualcy"`` (annual, calendar
         year), or ``"annualwy"`` (annual, water year). See
@@ -190,11 +193,10 @@ def get_wateruse(
         ... )
 
     """
-    params: dict[str, Any] = {
+    base_params: dict[str, Any] = {
         "format": "csv",
         "model": model,
         "variable": to_str(variable),
-        "location": _resolve_location(state, county, huc),
         "timeres": timeres,
         "startdate": startdate,
         "enddate": enddate,
@@ -202,9 +204,21 @@ def get_wateruse(
         "limit": limit,
     }
     # Drop params the caller left unset; the service rejects empty values.
-    params = {k: v for k, v in params.items() if v is not None}
+    base_params = {k: v for k, v in base_params.items() if v is not None}
 
-    df, first_response = _fetch_all_pages(params, ssl_check=ssl_check)
+    # The NWDC queries one location per request, so fan a multi-value selector
+    # out into a request per location and concatenate the results.
+    locations = _resolve_locations(state, county, huc)
+    frame, first_response = _fetch_all_pages(
+        {**base_params, "location": locations[0]}, ssl_check=ssl_check
+    )
+    frames = [frame]
+    for location in locations[1:]:
+        frame, _ = _fetch_all_pages(
+            {**base_params, "location": location}, ssl_check=ssl_check
+        )
+        frames.append(frame)
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     return df, BaseMetadata(first_response)
 
 
@@ -212,15 +226,18 @@ def get_wateruse(
 _HUC_LENGTHS = (2, 4, 6, 8, 10, 12)
 
 
-def _resolve_location(
-    state: str | int | None, county: str | None, huc: str | None
-) -> str:
-    """Build the NWDC ``location=<type>:<id>`` value from the friendly selectors.
+def _resolve_locations(
+    state: str | int | Iterable[str | int] | None,
+    county: str | Iterable[str] | None,
+    huc: str | Iterable[str] | None,
+) -> list[str]:
+    """Build the NWDC ``location=<type>:<id>`` value(s) from the selectors.
 
-    Exactly one of ``state`` / ``county`` / ``huc`` must be given (the service
-    queries one area per call). ``state`` is normalized to its two-letter
-    postal code (the form ``stateCd`` requires); ``county`` is a five-digit FIPS
-    code; and a ``huc`` code's length selects its level (``huc2`` … ``huc12``).
+    Exactly one of ``state`` / ``county`` / ``huc`` must be given; each may be a
+    single value or a list. ``state`` is normalized to the two-letter postal
+    code ``stateCd`` requires; ``county`` is a five-digit FIPS code; and a
+    ``huc`` code's length selects its level (``huc2`` … ``huc12``). Returns one
+    location string per value — the caller issues one request per location.
     """
     provided = [
         name
@@ -235,26 +252,50 @@ def _resolve_location(
 
     if state is not None:
         postal = to_state(state, to="postal")
-        if not isinstance(postal, str):
-            raise ValueError("Only one state may be queried per call.")
-        return f"stateCd:{postal}"
+        postals = [postal] if isinstance(postal, str) else postal
+        locations = [f"stateCd:{code}" for code in postals]
+    elif county is not None:
+        locations = [f"countyCd:{_validate_county(c)}" for c in _as_list(county)]
+    else:
+        locations = [f"huc{len(c)}:{c}" for c in map(_validate_huc, _as_list(huc))]
 
-    if county is not None:
-        code = str(county).strip()
-        if not (code.isdigit() and len(code) == 5):
-            raise ValueError(
-                "county must be a five-digit state+county FIPS code "
-                f"(e.g. '55025'), got {county!r}."
-            )
-        return f"countyCd:{code}"
+    if not locations:
+        raise ValueError(
+            "The chosen location selector is empty; pass at least one value."
+        )
+    return locations
 
-    code = str(huc).strip()
+
+def _as_list(value: object) -> list[Any]:
+    """A scalar becomes a one-element list; any non-string iterable (list,
+    tuple, Series, ndarray, generator) is materialized to a list."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Iterable):
+        return list(value)
+    return [value]
+
+
+def _validate_county(value: object) -> str:
+    """Validate and normalize a five-digit state+county FIPS code."""
+    code = str(value).strip()
+    if not (code.isdigit() and len(code) == 5):
+        raise ValueError(
+            "county must be a five-digit state+county FIPS code "
+            f"(e.g. '55025'), got {value!r}."
+        )
+    return code
+
+
+def _validate_huc(value: object) -> str:
+    """Validate a HUC code (even length 2-12 digits; level set by length)."""
+    code = str(value).strip()
     if not (code.isdigit() and len(code) in _HUC_LENGTHS):
         raise ValueError(
             "huc must be a hydrologic unit code of even length 2-12 digits "
-            f"(e.g. '04', '07070005', '010900020502'), got {huc!r}."
+            f"(e.g. '04', '07070005', '010900020502'), got {value!r}."
         )
-    return f"huc{len(code)}:{code}"
+    return code
 
 
 def _fetch_all_pages(

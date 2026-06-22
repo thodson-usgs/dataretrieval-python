@@ -13,7 +13,7 @@ import pytest
 import dataretrieval
 from dataretrieval import wateruse
 from dataretrieval.utils import BaseMetadata
-from dataretrieval.wateruse import _next_page_url, _resolve_location, get_wateruse
+from dataretrieval.wateruse import _next_page_url, _resolve_locations, get_wateruse
 
 # Match the NWDC endpoint regardless of query string, so assertions can drill
 # into the captured params without coupling registration to param order.
@@ -220,19 +220,34 @@ def test_state_selector_builds_location_query(httpx_mock):
     assert qs["location"] == ["stateCd:RI"]
 
 
-# --- _resolve_location unit tests (no HTTP) --------------------------------
+def test_multiple_states_fan_out_into_separate_requests(httpx_mock):
+    """A list selector issues one request per location and concatenates them."""
+    httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_P1)  # first state
+    httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_P2)  # second state
+
+    df, _ = get_wateruse(model="wu-public-supply-wd", state=["RI", "Wisconsin"])
+
+    # _CSV_P1 (2 rows) + _CSV_P2 (1 row), one request per state.
+    assert len(df) == 3
+    reqs = httpx_mock.get_requests()
+    assert len(reqs) == 2
+    locations = [parse_qs(urlsplit(str(r.url)).query)["location"][0] for r in reqs]
+    assert locations == ["stateCd:RI", "stateCd:WI"]
 
 
-def test_resolve_location_state_accepts_name_postal_fips():
+# --- _resolve_locations unit tests (no HTTP) -------------------------------
+
+
+def test_resolve_locations_state_accepts_name_postal_fips():
     # All three encodings normalize to the two-letter postal code stateCd wants.
-    assert _resolve_location("Rhode Island", None, None) == "stateCd:RI"
-    assert _resolve_location("ri", None, None) == "stateCd:RI"
-    assert _resolve_location("44", None, None) == "stateCd:RI"
-    assert _resolve_location(44, None, None) == "stateCd:RI"
+    assert _resolve_locations("Rhode Island", None, None) == ["stateCd:RI"]
+    assert _resolve_locations("ri", None, None) == ["stateCd:RI"]
+    assert _resolve_locations("44", None, None) == ["stateCd:RI"]
+    assert _resolve_locations(44, None, None) == ["stateCd:RI"]
 
 
-def test_resolve_location_county_five_digit_fips():
-    assert _resolve_location(None, "55025", None) == "countyCd:55025"
+def test_resolve_locations_county_five_digit_fips():
+    assert _resolve_locations(None, "55025", None) == ["countyCd:55025"]
 
 
 @pytest.mark.parametrize(
@@ -244,24 +259,44 @@ def test_resolve_location_county_five_digit_fips():
         ("010900020502", "huc12:010900020502"),
     ],
 )
-def test_resolve_location_huc_level_from_length(code, expected):
-    assert _resolve_location(None, None, code) == expected
+def test_resolve_locations_huc_level_from_length(code, expected):
+    assert _resolve_locations(None, None, code) == [expected]
 
 
-def test_resolve_location_requires_exactly_one():
+def test_resolve_locations_accepts_lists():
+    assert _resolve_locations(["RI", "Wisconsin"], None, None) == [
+        "stateCd:RI",
+        "stateCd:WI",
+    ]
+    assert _resolve_locations(None, ["55025", "55021"], None) == [
+        "countyCd:55025",
+        "countyCd:55021",
+    ]
+    assert _resolve_locations(None, None, ["04", "070700"]) == [
+        "huc2:04",
+        "huc6:070700",
+    ]
+
+
+def test_resolve_locations_requires_exactly_one():
     with pytest.raises(ValueError, match="exactly one"):
-        _resolve_location(None, None, None)
+        _resolve_locations(None, None, None)
     with pytest.raises(ValueError, match="exactly one"):
-        _resolve_location("RI", "55025", None)
+        _resolve_locations("RI", "55025", None)
 
 
-def test_resolve_location_rejects_malformed_selectors():
+def test_resolve_locations_empty_list_rejected():
+    with pytest.raises(ValueError, match="empty"):
+        _resolve_locations([], None, None)
+
+
+def test_resolve_locations_rejects_malformed_selectors():
     with pytest.raises(ValueError):  # unrecognized state
-        _resolve_location("Atlantis", None, None)
+        _resolve_locations("Atlantis", None, None)
     with pytest.raises(ValueError, match="five-digit"):  # county not 5 digits
-        _resolve_location(None, "025", None)
+        _resolve_locations(None, "025", None)
     with pytest.raises(ValueError, match="hydrologic unit"):  # odd-length huc
-        _resolve_location(None, None, "123")
+        _resolve_locations(None, None, "123")
 
 
 # --- _next_page_url unit tests (no HTTP) -----------------------------------
