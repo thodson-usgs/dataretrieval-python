@@ -39,19 +39,19 @@ Examples
 
 from __future__ import annotations
 
+import io
 import logging
-from io import StringIO
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pandas as pd
 
-from dataretrieval.exceptions import error_for_status
 from dataretrieval.utils import (
     HTTPX_DEFAULTS,
     BaseMetadata,
     _default_headers,
     _get,
+    _raise_for_status,
     to_str,
 )
 
@@ -200,32 +200,30 @@ def _fetch_all_pages(
     Returns the combined frame and the first page's response (for metadata).
     """
     headers = _default_headers()
-    frames: list[pd.DataFrame] = []
-    first_response: httpx.Response | None = None
-    next_url: str | None = WATERUSE_URL
-    request_params: dict[str, Any] | None = params
+    frame, first_response = _fetch_page(WATERUSE_URL, params, headers, ssl_check)
+    frames = [frame]
+    next_url = _next_page_url(first_response)
     while next_url is not None:
-        response = _get(
-            next_url,
-            params=request_params,
-            headers=headers,
-            verify=ssl_check,
-            **HTTPX_DEFAULTS,
-        )
-        _raise_for_status(response)
-        logger.debug("Requested water-use page: %s", response.url)
-        if first_response is None:
-            first_response = response
-
-        frames.append(pd.read_csv(StringIO(response.text), dtype={_HUC12_COLUMN: str}))
+        frame, response = _fetch_page(next_url, None, headers, ssl_check)
+        frames.append(frame)
         next_url = _next_page_url(response)
-        request_params = None
+    return pd.concat(frames, ignore_index=True), first_response
 
-    # first_response is always set: the loop runs at least once and any error
-    # response raises before this point.
-    assert first_response is not None
-    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    return df, first_response
+
+def _fetch_page(
+    url: str,
+    params: dict[str, Any] | None,
+    headers: dict[str, str],
+    ssl_check: bool,
+) -> tuple[pd.DataFrame, httpx.Response]:
+    """Fetch one water-use page and parse its CSV body into a DataFrame."""
+    response = _get(
+        url, params=params, headers=headers, verify=ssl_check, **HTTPX_DEFAULTS
+    )
+    _raise_for_status(response, detail_from=_nwdc_error_detail)
+    logger.debug("Requested water-use page: %s", response.url)
+    frame = pd.read_csv(io.BytesIO(response.content), dtype={_HUC12_COLUMN: str})
+    return frame, response
 
 
 def _next_page_url(response: httpx.Response) -> str | None:
@@ -236,35 +234,21 @@ def _next_page_url(response: httpx.Response) -> str | None:
     host is normalized to the public ``api.water.usgs.gov`` gateway so the
     follow-up request reaches the API.
     """
-    next_link = response.links.get("next")
-    if not next_link:
-        return None
-    url = next_link.get("url")
+    url = response.links.get("next", {}).get("url")
     if not url:
         return None
     return url.replace("https://water.usgs.gov", "https://api.water.usgs.gov", 1)
 
 
-def _raise_for_status(response: httpx.Response) -> None:
-    """Raise the typed :class:`DataRetrievalError` for an HTTP error response.
+def _nwdc_error_detail(response: httpx.Response) -> str | None:
+    """Pull the ``detail`` message out of an NWDC JSON error envelope, if any.
 
-    Maps the status to its taxonomy subclass via
-    :func:`~dataretrieval.exceptions.error_for_status`, surfacing the NWDC
-    JSON error envelope's ``detail`` field (e.g. ``"Invalid model name: ..."``)
-    in the message when present.
+    The NWDC reports errors as ``{"detail": "Invalid model name: ..."}``. Passed
+    to :func:`~dataretrieval.utils._raise_for_status` as ``detail_from`` so the
+    service's wording surfaces in the typed error message.
     """
-    status = response.status_code
-    if status < 400:
-        return
-    detail = None
     try:
         body = response.json()
     except ValueError:
-        body = None
-    if isinstance(body, dict):
-        detail = body.get("detail")
-    message = f"HTTP {status} {response.reason_phrase}".rstrip()
-    if detail:
-        message += f": {detail}"
-    message += f" (URL: {response.url})"
-    raise error_for_status(status, message)
+        return None
+    return body.get("detail") if isinstance(body, dict) else None

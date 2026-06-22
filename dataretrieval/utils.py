@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import httpx
@@ -337,26 +337,38 @@ def _get(url: str | httpx.URL, **kwargs: Any) -> httpx.Response:
         raise _network_error(url, exc) from exc
 
 
-def _raise_for_status(response: httpx.Response) -> None:
+def _raise_for_status(
+    response: httpx.Response,
+    *,
+    detail_from: Callable[[httpx.Response], str | None] | None = None,
+) -> None:
     """Raise the typed :class:`DataRetrievalError` for an HTTP error response;
     return ``None`` on success.
 
-    Shared by the legacy :func:`query` path (and ``nadp`` / ``streamstats``).
-    Delegates the status-to-type mapping to
+    Shared by the legacy :func:`query` path (and ``nadp`` / ``streamstats`` /
+    ``wateruse``). Delegates the status-to-type mapping to
     :func:`dataretrieval.exceptions.error_for_status`, except a too-long-URL
     status (413 / 414): that gets the same actionable "split your query"
     remediation as the client-side over-long-URL case below, rather than a bare
     ``HTTP 414`` (both still raise :class:`~dataretrieval.exceptions.URLTooLong`).
+
+    ``detail_from``, when given, is called *only on an error response* to pull an
+    API-specific detail string (e.g. a JSON error envelope's message) out of the
+    body; a truthy result is appended to the raised message. This lets callers
+    surface their API's error wording without re-implementing the status-to-type
+    mapping and message format.
     """
     status = response.status_code
     if status < 400:
         return
     if status in (413, 414):
         raise _url_too_long_error(f"API response reason: {response.reason_phrase}")
-    raise error_for_status(
-        status,
-        f"HTTP {status} {response.reason_phrase}".rstrip() + f" (URL: {response.url})",
-    )
+    message = f"HTTP {status} {response.reason_phrase}".rstrip()
+    detail = detail_from(response) if detail_from is not None else None
+    if detail:
+        message += f": {detail}"
+    message += f" (URL: {response.url})"
+    raise error_for_status(status, message)
 
 
 def query(
