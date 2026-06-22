@@ -11,8 +11,8 @@ Access each service through its submodule::
     df, meta = nwis.get_dv(sites="05427718")
 
 Available service modules: ``waterdata``, ``wqp`` (Water Quality Portal),
-``nldi``, ``samples``, ``streamstats``, and the deprecated ``nwis`` and
-``nadp``.
+``wateruse`` (NWDC water-use data), ``ngwmn`` (groundwater levels), ``nldi``,
+``samples``, ``streamstats``, and the deprecated ``nwis`` and ``nadp``.
 
 ``nldi`` requires geopandas (``pip install dataretrieval[nldi]``) and is
 imported on demand: ``from dataretrieval import nldi``.
@@ -65,6 +65,7 @@ from . import (
     streamstats,
     utils,
     waterdata,
+    wateruse,
     wqp,
 )
 
@@ -77,6 +78,7 @@ __all__ = [
     "streamstats",
     "utils",
     "waterdata",
+    "wateruse",
     "wqp",
     # error taxonomy (canonical home: ``dataretrieval.exceptions``), re-exported
     # so callers can ``except dataretrieval.DataRetrievalError``

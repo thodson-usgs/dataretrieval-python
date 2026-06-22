@@ -168,6 +168,31 @@ flowlines = nldi.get_flowlines(
 print(f"Found {len(flowlines)} upstream tributaries within 50km")
 ```
 
+### Water Use (NWDC)
+
+Retrieve modeled water-use estimates from the National Water Availability
+Assessment Data Companion:
+
+```python
+from dataretrieval import wateruse
+
+# Monthly public-supply withdrawals for Rhode Island, split into
+# groundwater and surface-water sources (returns a DataFrame and metadata).
+df, metadata = wateruse.get_wateruse(
+    model='wu-public-supply-wd',
+    variable=['pswdtot', 'pswdgw', 'pswdsw'],
+    location='stateCd:RI',
+    startdate='2020-01',
+    timeres='monthly',
+)
+
+print(f"Retrieved {len(df)} records across {df['huc12_id'].nunique()} watersheds")
+
+# Aggregate the HUC12 grid to a statewide monthly total (million gallons/day)
+statewide = df.groupby('year_month')['pswdtot_mgd'].sum()
+print(statewide.head())
+```
+
 ## Available Data Services
 
 ### Modern USGS Water Data APIs (Recommended)
@@ -199,6 +224,13 @@ print(f"Found {len(flowlines)} upstream tributaries within 50km")
 - **Flow navigation**: Upstream/downstream network traversal
 - **Feature discovery**: Find monitoring sites, dams, and other features
 - **Hydrologic connectivity**: Link data across the stream network
+
+### Water Use (NWDC)
+- **Public supply**: Modeled public-supply withdrawals and consumptive use
+- **Irrigation**: Modeled irrigation withdrawals and consumptive use
+- **Thermoelectric**: Modeled thermoelectric-power water use
+- **HUC12 estimates**: National coverage on a 12-digit hydrologic-unit grid,
+  summarizable to counties, states, or coarser hydrologic units
 
 ## More Examples
 
