@@ -265,6 +265,41 @@ def test_fan_out_is_serial_when_concurrency_is_one(httpx_mock, monkeypatch):
     assert len(httpx_mock.get_requests()) == 2
 
 
+def test_fan_out_surfaces_final_rate_limit_header(httpx_mock):
+    """``md.header`` reports the lowest (latest) remaining quota across the fan-out,
+    not the first request's value."""
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r".*location=stateCd%3ARI.*"),
+        text=_CSV_P1,
+        headers={"x-ratelimit-remaining": "900"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r".*location=stateCd%3AWI.*"),
+        text=_CSV_P2,
+        headers={"x-ratelimit-remaining": "850"},
+    )
+
+    _, md = get_wateruse(model="wu-public-supply-wd", state=["RI", "WI"])
+
+    assert md.header["x-ratelimit-remaining"] == "850"
+
+
+def test_most_depleted_picks_lowest_remaining():
+    responses = [
+        httpx.Response(200, headers={"x-ratelimit-remaining": "900"}),
+        httpx.Response(200, headers={"x-ratelimit-remaining": "850"}),
+        httpx.Response(200, headers={"x-ratelimit-remaining": "875"}),
+    ]
+    assert wateruse._most_depleted(responses) is responses[1]
+
+
+def test_most_depleted_falls_back_to_last_when_header_absent():
+    responses = [httpx.Response(200), httpx.Response(200)]
+    assert wateruse._most_depleted(responses) is responses[1]
+
+
 # --- _resolve_locations unit tests (no HTTP) -------------------------------
 
 

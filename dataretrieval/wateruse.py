@@ -39,6 +39,8 @@ Examples
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import io
 import logging
 from collections.abc import Iterable
@@ -54,7 +56,7 @@ from dataretrieval.utils import (
     HTTPX_DEFAULTS,
     BaseMetadata,
     _default_headers,
-    _get,
+    _network_error,
     _raise_for_status,
     to_str,
 )
@@ -216,27 +218,17 @@ def get_wateruse(
     base_params = {k: v for k, v in base_params.items() if v is not None}
 
     # The NWDC queries one location per request, so fan a multi-value selector
-    # out into a request per location and concatenate the results.
+    # out into a request per location (concurrently — see ``_fan_out``) and
+    # concatenate the results.
     locations = _resolve_locations(state, county, huc)
-
-    def _fetch(location: str) -> tuple[pd.DataFrame, httpx.Response]:
-        return _fetch_all_pages(
-            {**base_params, "location": location}, ssl_check=ssl_check
-        )
-
-    if len(locations) == 1:
-        # Common case: no pool, and no extra concat copy of the whole result.
-        frame, response = _fetch(locations[0])
-        return frame, BaseMetadata(response)
-
-    # Fan out concurrently (bounded), preserving input order. The locations are
-    # independent single requests, so a thread pool over the synchronous fetch
-    # needs no shared state or backoff; ``pool.map`` re-raises the first failure.
-    workers = min(len(locations), max(1, MAX_CONCURRENT_REQUESTS))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(_fetch, locations))
-    df = pd.concat([frame for frame, _ in results], ignore_index=True)
-    return df, BaseMetadata(results[0][1])
+    # Drive the async fan-out from a worker thread so it is safe even when
+    # called inside an already-running event loop (e.g. a Jupyter notebook),
+    # where a bare ``asyncio.run`` would raise.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        df, response = pool.submit(
+            lambda: asyncio.run(_fan_out(locations, base_params, ssl_check))
+        ).result()
+    return df, BaseMetadata(response)
 
 
 # Valid HUC code lengths (digits) → the hydrologic-unit level they query.
@@ -316,49 +308,73 @@ def _validate_huc(value: object) -> str:
     return code
 
 
-def _fetch_all_pages(
-    params: dict[str, Any], *, ssl_check: bool
+async def _fan_out(
+    locations: list[str], base_params: dict[str, Any], ssl_check: bool
 ) -> tuple[pd.DataFrame, httpx.Response]:
-    """Fetch every page of a water-use query and concatenate the CSV bodies.
+    """Fetch every location concurrently over one shared async client.
+
+    Each location is an independent paginated request; concurrency is bounded by
+    a semaphore at :data:`MAX_CONCURRENT_REQUESTS`, and ``asyncio.gather``
+    preserves input order so the concatenation is deterministic. The single
+    shared :class:`httpx.AsyncClient` keeps connections alive across pages and
+    locations.
+    """
+    headers = _default_headers()
+    semaphore = asyncio.Semaphore(max(1, MAX_CONCURRENT_REQUESTS))
+
+    async with httpx.AsyncClient(verify=ssl_check, **HTTPX_DEFAULTS) as client:
+
+        async def _one(location: str) -> tuple[pd.DataFrame, list[httpx.Response]]:
+            async with semaphore:
+                return await _fetch_location(client, location, base_params, headers)
+
+        results = await asyncio.gather(*(_one(loc) for loc in locations))
+
+    frames = [frame for frame, _ in results]
+    responses = [resp for _, page_responses in results for resp in page_responses]
+    df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+    return df, _aggregate_responses(responses)
+
+
+async def _fetch_location(
+    client: httpx.AsyncClient,
+    location: str,
+    base_params: dict[str, Any],
+    headers: dict[str, str],
+) -> tuple[pd.DataFrame, list[httpx.Response]]:
+    """Fetch and concatenate every page for one location over ``client``.
 
     The NWDC paginates large areas with an RFC 8288 ``Link: <...>; rel="next"``
     header (the cursor is a ``skip`` offset). The first request carries the
-    query params; each subsequent page is a fully-formed URL we request bare.
-    Returns the combined frame and the first page's response (for metadata).
+    query params; each subsequent page is a fully-formed URL requested bare. The
+    ``seen`` set guards against a non-advancing or cyclic cursor (a server bug
+    that would otherwise loop forever, accumulating frames until OOM).
     """
-    headers = _default_headers()
-    frame, first_response = _fetch_page(WATERUSE_URL, params, headers, ssl_check)
-    frames = [frame]
-    # Guard against a non-advancing or cyclic ``next`` cursor (a server bug
-    # would otherwise spin this loop forever, accumulating frames until OOM):
-    # stop if a page points back to a URL we have already fetched.
+    frames: list[pd.DataFrame] = []
+    responses: list[httpx.Response] = []
     seen: set[str] = set()
-    next_url = _next_page_url(first_response)
-    while next_url is not None and next_url not in seen:
-        seen.add(next_url)
-        frame, response = _fetch_page(next_url, None, headers, ssl_check)
-        frames.append(frame)
-        next_url = _next_page_url(response)
-    # Avoid re-copying the (often whole) single-page result, matching the
-    # per-location concat in get_wateruse.
+    url: str | None = WATERUSE_URL
+    params: dict[str, Any] | None = {**base_params, "location": location}
+    while url is not None and url not in seen:
+        seen.add(url)
+        try:
+            response = await client.get(url, params=params, headers=headers)
+        except httpx.TransportError as exc:
+            raise _network_error(url, exc) from exc
+        _raise_for_status(response, detail_from=_nwdc_error_detail)
+        logger.debug("Requested water-use page: %s", response.url)
+        responses.append(response)
+        frames.append(_read_csv_page(response))
+        url, params = _next_page_url(response), None
+
     df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
-    return df, first_response
+    return df, responses
 
 
-def _fetch_page(
-    url: str,
-    params: dict[str, Any] | None,
-    headers: dict[str, str],
-    ssl_check: bool,
-) -> tuple[pd.DataFrame, httpx.Response]:
-    """Fetch one water-use page and parse its CSV body into a DataFrame."""
-    response = _get(
-        url, params=params, headers=headers, verify=ssl_check, **HTTPX_DEFAULTS
-    )
-    _raise_for_status(response, detail_from=_nwdc_error_detail)
-    logger.debug("Requested water-use page: %s", response.url)
+def _read_csv_page(response: httpx.Response) -> pd.DataFrame:
+    """Parse one CSV page; ``huc12_id`` stays a string to keep leading zeros."""
     try:
-        frame = pd.read_csv(io.BytesIO(response.content), dtype={_HUC12_COLUMN: str})
+        return pd.read_csv(io.BytesIO(response.content), dtype={_HUC12_COLUMN: str})
     except pd.errors.EmptyDataError as exc:
         # NWDC normally signals "no data" with a 400 (handled above) or rows of
         # zeros, never an empty body — but keep the typed-error contract if it
@@ -366,7 +382,38 @@ def _fetch_page(
         raise DataRetrievalError(
             f"NWDC returned an empty response body (URL: {response.url})."
         ) from exc
-    return frame, response
+
+
+def _aggregate_responses(responses: list[httpx.Response]) -> httpx.Response:
+    """Fold the per-page, per-location responses into one for metadata.
+
+    Keeps the first request's URL (the query identity) but surfaces the *final*
+    rate-limit headers — those of the response that saw the lowest
+    ``x-ratelimit-remaining``, i.e. the quota left after the whole fan-out — and
+    the cumulative elapsed time. A single response is returned unchanged.
+    """
+    first = responses[0]
+    if len(responses) == 1:
+        return first
+    final = copy.copy(first)
+    final.headers = httpx.Headers(_most_depleted(responses).headers)
+    final.elapsed = sum((r.elapsed for r in responses[1:]), start=first.elapsed)
+    return final
+
+
+def _most_depleted(responses: list[httpx.Response]) -> httpx.Response:
+    """The response reporting the lowest ``x-ratelimit-remaining`` (the latest
+    server-side view of the quota), or the last response if none report it."""
+    best: httpx.Response | None = None
+    best_remaining: int | None = None
+    for response in responses:
+        try:
+            remaining = int(response.headers["x-ratelimit-remaining"])
+        except (KeyError, ValueError):
+            continue
+        if best_remaining is None or remaining < best_remaining:
+            best, best_remaining = response, remaining
+    return best if best is not None else responses[-1]
 
 
 def _next_page_url(response: httpx.Response) -> str | None:
