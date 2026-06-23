@@ -10,10 +10,14 @@ legacy NWIS water-use service (``nwis.get_water_use``).
 
 Unlike the main Water Data getters (:mod:`dataretrieval.waterdata`) and NGWMN
 (:mod:`dataretrieval.ngwmn`), the NWDC is a plain CSV REST service rather than
-an OGC API Features collection, so this module talks to it directly instead of
-delegating to the shared OGC engine. It still follows the same conventions:
-shared request headers (:func:`~dataretrieval.utils._default_headers`),
-the typed :class:`~dataretrieval.exceptions.DataRetrievalError` taxonomy, and a
+an OGC API Features collection. This module supplies the NWDC-specific bits —
+request building, CSV parsing, the ``Link``-header cursor, and the ``{detail}``
+error envelope — but reuses the OGC engine's generic, API-agnostic pagination
+and sync-from-async plumbing (:func:`~dataretrieval.ogc.engine._paginate` and
+:func:`~dataretrieval.ogc.engine._run_sync`) rather than re-implementing it. It
+follows the same conventions: shared request headers
+(:func:`~dataretrieval.utils._default_headers`), the typed
+:class:`~dataretrieval.exceptions.DataRetrievalError` taxonomy, and a
 ``(DataFrame, BaseMetadata)`` return.
 
 See https://api.water.usgs.gov/docs/nwaa-data/ for the API reference and
@@ -40,11 +44,8 @@ Examples
 from __future__ import annotations
 
 import asyncio
-import copy
 import io
-import logging
-from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import httpx
@@ -52,16 +53,15 @@ import pandas as pd
 
 from dataretrieval.codes.states import to_state
 from dataretrieval.exceptions import DataRetrievalError
+from dataretrieval.ogc.engine import _ogc_base_url, _paginate, _run_sync
+from dataretrieval.ogc.planning import _combine_chunk_frames, _combine_chunk_responses
 from dataretrieval.utils import (
     HTTPX_DEFAULTS,
     BaseMetadata,
     _default_headers,
-    _network_error,
     _raise_for_status,
     to_str,
 )
-
-logger = logging.getLogger(__name__)
 
 WATERUSE_URL = "https://api.water.usgs.gov/nwaa-data/data"
 
@@ -218,21 +218,42 @@ def get_wateruse(
     base_params = {k: v for k, v in base_params.items() if v is not None}
 
     # The NWDC queries one location per request, so fan a multi-value selector
-    # out into a request per location (concurrently — see ``_fan_out``) and
-    # concatenate the results.
-    locations = _resolve_locations(state, county, huc)
-    # Drive the async fan-out from a worker thread so it is safe even when
-    # called inside an already-running event loop (e.g. a Jupyter notebook),
-    # where a bare ``asyncio.run`` would raise.
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        df, response = pool.submit(
-            lambda: asyncio.run(_fan_out(locations, base_params, ssl_check))
-        ).result()
+    # out into one request per location, each paginated by the OGC engine's
+    # shared pager (``_paginate``), and concatenate the results.
+    headers = _default_headers()
+    requests = [
+        httpx.Request(
+            "GET",
+            WATERUSE_URL,
+            params={**base_params, "location": location},
+            headers=headers,
+        )
+        for location in _resolve_locations(state, county, huc)
+    ]
+    # ``_run_sync`` drives the async fan-out via an anyio portal, so it is safe
+    # even inside an already-running event loop (e.g. a Jupyter notebook);
+    # ``_ogc_base_url`` sets the host reported in any connection-error message.
+    with _ogc_base_url(WATERUSE_URL):
+        df, response = _run_sync(
+            lambda: _fan_out(requests, headers, ssl_check), service="wateruse"
+        )
     return df, BaseMetadata(response)
 
 
 # Valid HUC code lengths (digits) → the hydrologic-unit level they query.
 _HUC_LENGTHS = (2, 4, 6, 8, 10, 12)
+
+# Maps each selector to the NWDC ``location=<type>:<id>`` value(s) it produces.
+# A value may be a single code or a list; ``_as_list`` normalizes both (``state``
+# additionally normalizes to the two-letter postal code, and ``to_state`` may
+# itself return a scalar or list, which ``_as_list`` flattens the same way).
+# Since NWDC takes one location per request, a list value fans out — one request
+# per location (see :func:`_fan_out`).
+_LOCATION_BUILDERS: dict[str, Callable[[Any], list[str]]] = {
+    "state": lambda v: [f"stateCd:{c}" for c in _as_list(to_state(v, to="postal"))],
+    "county": lambda v: [f"countyCd:{_validate_county(c)}" for c in _as_list(v)],
+    "huc": lambda v: [f"huc{len(c)}:{c}" for c in map(_validate_huc, _as_list(v))],
+}
 
 
 def _resolve_locations(
@@ -248,28 +269,18 @@ def _resolve_locations(
     ``huc`` code's length selects its level (``huc2`` … ``huc12``). Returns one
     location string per value — the caller issues one request per location.
     """
-    provided = [
-        name
+    selected = {
+        name: value
         for name, value in (("state", state), ("county", county), ("huc", huc))
         if value is not None
-    ]
-    if len(provided) != 1:
+    }
+    if len(selected) != 1:
         raise ValueError(
             "Specify exactly one of state, county, or huc "
-            f"(got: {', '.join(provided) or 'none'})."
+            f"(got: {', '.join(selected) or 'none'})."
         )
-
-    if state is not None:
-        # to_state returns a str (scalar) or list[str] (iterable); _as_list
-        # normalizes both, keeping this branch the same shape as county/huc.
-        locations = [
-            f"stateCd:{code}" for code in _as_list(to_state(state, to="postal"))
-        ]
-    elif county is not None:
-        locations = [f"countyCd:{_validate_county(c)}" for c in _as_list(county)]
-    else:
-        locations = [f"huc{len(c)}:{c}" for c in map(_validate_huc, _as_list(huc))]
-
+    [(name, value)] = selected.items()
+    locations = _LOCATION_BUILDERS[name](value)
     if not locations:
         raise ValueError(
             "The chosen location selector is empty; pass at least one value."
@@ -309,66 +320,52 @@ def _validate_huc(value: object) -> str:
 
 
 async def _fan_out(
-    locations: list[str], base_params: dict[str, Any], ssl_check: bool
+    requests: list[httpx.Request], headers: dict[str, str], ssl_check: bool
 ) -> tuple[pd.DataFrame, httpx.Response]:
-    """Fetch every location concurrently over one shared async client.
+    """Fetch every request (each paginated) concurrently over one shared client.
 
-    Each location is an independent paginated request; concurrency is bounded by
-    a semaphore at :data:`MAX_CONCURRENT_REQUESTS`, and ``asyncio.gather``
-    preserves input order so the concatenation is deterministic. The single
-    shared :class:`httpx.AsyncClient` keeps connections alive across pages and
-    locations.
+    Each request is paginated by the engine's
+    :func:`~dataretrieval.ogc.engine._paginate` with NWDC strategies: parse a CSV
+    page and read its ``Link`` header cursor (``parse``), follow that cursor
+    (``follow``), and raise the typed error carrying the NWDC ``detail``
+    (``raise_for_status``). Concurrency is bounded by a semaphore at
+    :data:`MAX_CONCURRENT_REQUESTS`, and ``asyncio.gather`` preserves input
+    order, so the concatenation is deterministic. The shared
+    :class:`httpx.AsyncClient` keeps connections alive across pages and requests.
     """
-    headers = _default_headers()
-    semaphore = asyncio.Semaphore(max(1, MAX_CONCURRENT_REQUESTS))
+
+    def parse(response: httpx.Response) -> tuple[pd.DataFrame, str | None]:
+        return _read_csv_page(response), _next_page_url(response)
+
+    async def follow(cursor: str, sess: httpx.AsyncClient) -> httpx.Response:
+        return await sess.get(cursor, headers=headers)
+
+    def raise_for_status(response: httpx.Response) -> None:
+        _raise_for_status(response, detail_from=_nwdc_error_detail)
 
     async with httpx.AsyncClient(verify=ssl_check, **HTTPX_DEFAULTS) as client:
+        semaphore = asyncio.Semaphore(max(1, MAX_CONCURRENT_REQUESTS))
 
-        async def _one(location: str) -> tuple[pd.DataFrame, list[httpx.Response]]:
+        async def _one(request: httpx.Request) -> tuple[pd.DataFrame, httpx.Response]:
             async with semaphore:
-                return await _fetch_location(client, location, base_params, headers)
+                return await _paginate(
+                    request,
+                    parse_response=parse,
+                    follow_up=follow,
+                    client=client,
+                    raise_for_status=raise_for_status,
+                )
 
-        results = await asyncio.gather(*(_one(loc) for loc in locations))
+        results = await asyncio.gather(*(_one(req) for req in requests))
 
+    # Reuse the engine's combine helpers: drop empty frames and concat, and fold
+    # the per-location responses into one (lowest-remaining rate-limit headers +
+    # cumulative elapsed), keeping the first request's URL as the query identity.
     frames = [frame for frame, _ in results]
-    responses = [resp for _, page_responses in results for resp in page_responses]
-    df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
-    return df, _aggregate_responses(responses)
-
-
-async def _fetch_location(
-    client: httpx.AsyncClient,
-    location: str,
-    base_params: dict[str, Any],
-    headers: dict[str, str],
-) -> tuple[pd.DataFrame, list[httpx.Response]]:
-    """Fetch and concatenate every page for one location over ``client``.
-
-    The NWDC paginates large areas with an RFC 8288 ``Link: <...>; rel="next"``
-    header (the cursor is a ``skip`` offset). The first request carries the
-    query params; each subsequent page is a fully-formed URL requested bare. The
-    ``seen`` set guards against a non-advancing or cyclic cursor (a server bug
-    that would otherwise loop forever, accumulating frames until OOM).
-    """
-    frames: list[pd.DataFrame] = []
-    responses: list[httpx.Response] = []
-    seen: set[str] = set()
-    url: str | None = WATERUSE_URL
-    params: dict[str, Any] | None = {**base_params, "location": location}
-    while url is not None and url not in seen:
-        seen.add(url)
-        try:
-            response = await client.get(url, params=params, headers=headers)
-        except httpx.TransportError as exc:
-            raise _network_error(url, exc) from exc
-        _raise_for_status(response, detail_from=_nwdc_error_detail)
-        logger.debug("Requested water-use page: %s", response.url)
-        responses.append(response)
-        frames.append(_read_csv_page(response))
-        url, params = _next_page_url(response), None
-
-    df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
-    return df, responses
+    responses = [resp for _, resp in results]
+    return _combine_chunk_frames(frames), _combine_chunk_responses(
+        responses, str(requests[0].url)
+    )
 
 
 def _read_csv_page(response: httpx.Response) -> pd.DataFrame:
@@ -382,38 +379,6 @@ def _read_csv_page(response: httpx.Response) -> pd.DataFrame:
         raise DataRetrievalError(
             f"NWDC returned an empty response body (URL: {response.url})."
         ) from exc
-
-
-def _aggregate_responses(responses: list[httpx.Response]) -> httpx.Response:
-    """Fold the per-page, per-location responses into one for metadata.
-
-    Keeps the first request's URL (the query identity) but surfaces the *final*
-    rate-limit headers — those of the response that saw the lowest
-    ``x-ratelimit-remaining``, i.e. the quota left after the whole fan-out — and
-    the cumulative elapsed time. A single response is returned unchanged.
-    """
-    first = responses[0]
-    if len(responses) == 1:
-        return first
-    final = copy.copy(first)
-    final.headers = httpx.Headers(_most_depleted(responses).headers)
-    final.elapsed = sum((r.elapsed for r in responses[1:]), start=first.elapsed)
-    return final
-
-
-def _most_depleted(responses: list[httpx.Response]) -> httpx.Response:
-    """The response reporting the lowest ``x-ratelimit-remaining`` (the latest
-    server-side view of the quota), or the last response if none report it."""
-    best: httpx.Response | None = None
-    best_remaining: int | None = None
-    for response in responses:
-        try:
-            remaining = int(response.headers["x-ratelimit-remaining"])
-        except (KeyError, ValueError):
-            continue
-        if best_remaining is None or remaining < best_remaining:
-            best, best_remaining = response, remaining
-    return best if best is not None else responses[-1]
 
 
 def _next_page_url(response: httpx.Response) -> str | None:

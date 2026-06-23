@@ -286,18 +286,8 @@ def test_fan_out_surfaces_final_rate_limit_header(httpx_mock):
     assert md.header["x-ratelimit-remaining"] == "850"
 
 
-def test_most_depleted_picks_lowest_remaining():
-    responses = [
-        httpx.Response(200, headers={"x-ratelimit-remaining": "900"}),
-        httpx.Response(200, headers={"x-ratelimit-remaining": "850"}),
-        httpx.Response(200, headers={"x-ratelimit-remaining": "875"}),
-    ]
-    assert wateruse._most_depleted(responses) is responses[1]
-
-
-def test_most_depleted_falls_back_to_last_when_header_absent():
-    responses = [httpx.Response(200), httpx.Response(200)]
-    assert wateruse._most_depleted(responses) is responses[1]
+# (response aggregation now reuses ogc.planning._combine_chunk_responses; the
+# integration test above pins the rate-limit-header behavior end-to-end.)
 
 
 # --- _resolve_locations unit tests (no HTTP) -------------------------------

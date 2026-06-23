@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import os
 import warnings
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Generic, TypeVar
 
 import httpx
 import pandas as pd
@@ -28,6 +30,40 @@ HTTPX_DEFAULTS: dict[str, Any] = {
     "follow_redirects": True,
     "timeout": httpx.Timeout(60.0, connect=10.0),
 }
+
+_T = TypeVar("_T")
+
+
+class Ambient(Generic[_T]):
+    """A :class:`~contextvars.ContextVar` paired with a scoping contextmanager.
+
+    Bundles the var and its set/reset-token dance into one object, so an ambient
+    value needs a single declaration instead of a ``var`` + setter-function pair.
+    Read the current value with :meth:`get`; set it for a ``with`` block by
+    *calling* the instance — the previous value is restored on exit (and can't
+    leak into a later call the way a hand-written ``try/finally`` can when its
+    ``reset`` is dropped)::
+
+        _base_url = Ambient("ogc_base_url", DEFAULT)
+        with _base_url(other):  # scoped to the block
+            _base_url.get()  # -> other
+    """
+
+    def __init__(self, name: str, default: _T) -> None:
+        self._var: ContextVar[_T] = ContextVar(name, default=default)
+
+    def get(self) -> _T:
+        """The current value — the default outside any active scope."""
+        return self._var.get()
+
+    @contextmanager
+    def __call__(self, value: _T) -> Iterator[None]:
+        """Set the value for the duration of the ``with`` block."""
+        token = self._var.set(value)
+        try:
+            yield
+        finally:
+            self._var.reset(token)
 
 
 def _default_headers() -> dict[str, str]:
