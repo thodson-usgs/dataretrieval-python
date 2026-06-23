@@ -220,19 +220,49 @@ def test_state_selector_builds_location_query(httpx_mock):
     assert qs["location"] == ["stateCd:RI"]
 
 
-def test_multiple_states_fan_out_into_separate_requests(httpx_mock):
-    """A list selector issues one request per location and concatenates them."""
-    httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_P1)  # first state
-    httpx_mock.add_response(method="GET", url=WU_RE, text=_CSV_P2)  # second state
+def test_multiple_states_fan_out_preserves_input_order(httpx_mock):
+    """A list selector fans out one request per location and concatenates the
+    results in the order given — even though the requests run concurrently and
+    may reach the server out of order. Each location is routed to its own
+    response so attribution is deterministic regardless of arrival order."""
+    httpx_mock.add_response(
+        method="GET", url=re.compile(r".*location=stateCd%3ARI.*"), text=_CSV_P1
+    )
+    httpx_mock.add_response(
+        method="GET", url=re.compile(r".*location=stateCd%3AWI.*"), text=_CSV_P2
+    )
 
     df, _ = get_wateruse(model="wu-public-supply-wd", state=["RI", "Wisconsin"])
 
-    # _CSV_P1 (2 rows) + _CSV_P2 (1 row), one request per state.
-    assert len(df) == 3
+    # RI's rows (_CSV_P1) precede WI's (_CSV_P2) regardless of which request the
+    # thread pool dispatched first.
+    assert df["huc12_id"].tolist() == [
+        "010900020502",
+        "010900020503",
+        "010900020504",
+    ]
     reqs = httpx_mock.get_requests()
     assert len(reqs) == 2
-    locations = [parse_qs(urlsplit(str(r.url)).query)["location"][0] for r in reqs]
-    assert locations == ["stateCd:RI", "stateCd:WI"]
+    assert {parse_qs(urlsplit(str(r.url)).query)["location"][0] for r in reqs} == {
+        "stateCd:RI",
+        "stateCd:WI",
+    }
+
+
+def test_fan_out_is_serial_when_concurrency_is_one(httpx_mock, monkeypatch):
+    """``MAX_CONCURRENT_REQUESTS = 1`` still fans out correctly (serial path)."""
+    monkeypatch.setattr(wateruse, "MAX_CONCURRENT_REQUESTS", 1)
+    httpx_mock.add_response(
+        method="GET", url=re.compile(r".*location=stateCd%3ARI.*"), text=_CSV_P1
+    )
+    httpx_mock.add_response(
+        method="GET", url=re.compile(r".*location=stateCd%3AWI.*"), text=_CSV_P2
+    )
+
+    df, _ = get_wateruse(model="wu-public-supply-wd", state=["RI", "WI"])
+
+    assert len(df) == 3
+    assert len(httpx_mock.get_requests()) == 2
 
 
 # --- _resolve_locations unit tests (no HTTP) -------------------------------

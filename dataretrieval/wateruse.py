@@ -42,6 +42,7 @@ from __future__ import annotations
 import io
 import logging
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
@@ -75,6 +76,13 @@ MODELS = (
 #: Temporal resolutions: monthly, annual calendar year, annual water year.
 TIME_RESOLUTIONS = ("monthly", "annualcy", "annualwy")
 
+#: Maximum locations fetched concurrently when a list of state/county/huc
+#: selectors is fanned out (one request per location). Kept conservative
+#: because this module intentionally carries no request backoff/retry; the
+#: NWDC tolerates this level of concurrency without rate-limit errors (verified
+#: by stress test). Set ``wateruse.MAX_CONCURRENT_REQUESTS = 1`` for serial.
+MAX_CONCURRENT_REQUESTS = 4
+
 # Page responses carry the HUC12 identifier in this column; it must stay a
 # string so leading zeros (e.g. "010900020502") survive the round trip.
 _HUC12_COLUMN = "huc12_id"
@@ -104,8 +112,9 @@ def get_wateruse(
     frame.
 
     Each selector also accepts a list of values. The NWDC queries one area per
-    request, so a list is fanned out into one request per value and the results
-    are concatenated — convenient, but proportionally slower for many areas.
+    request, so a list is fanned out into one request per value — up to
+    :data:`MAX_CONCURRENT_REQUESTS` in parallel — and the results are
+    concatenated in the order given.
 
     Parameters
     ----------
@@ -209,17 +218,25 @@ def get_wateruse(
     # The NWDC queries one location per request, so fan a multi-value selector
     # out into a request per location and concatenate the results.
     locations = _resolve_locations(state, county, huc)
-    frame, first_response = _fetch_all_pages(
-        {**base_params, "location": locations[0]}, ssl_check=ssl_check
-    )
-    frames = [frame]
-    for location in locations[1:]:
-        frame, _ = _fetch_all_pages(
+
+    def _fetch(location: str) -> tuple[pd.DataFrame, httpx.Response]:
+        return _fetch_all_pages(
             {**base_params, "location": location}, ssl_check=ssl_check
         )
-        frames.append(frame)
-    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    return df, BaseMetadata(first_response)
+
+    if len(locations) == 1:
+        # Common case: no pool, and no extra concat copy of the whole result.
+        frame, response = _fetch(locations[0])
+        return frame, BaseMetadata(response)
+
+    # Fan out concurrently (bounded), preserving input order. The locations are
+    # independent single requests, so a thread pool over the synchronous fetch
+    # needs no shared state or backoff; ``pool.map`` re-raises the first failure.
+    workers = min(len(locations), max(1, MAX_CONCURRENT_REQUESTS))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(_fetch, locations))
+    df = pd.concat([frame for frame, _ in results], ignore_index=True)
+    return df, BaseMetadata(results[0][1])
 
 
 # Valid HUC code lengths (digits) → the hydrologic-unit level they query.
