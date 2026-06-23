@@ -251,9 +251,11 @@ def _resolve_locations(
         )
 
     if state is not None:
-        postal = to_state(state, to="postal")
-        postals = [postal] if isinstance(postal, str) else postal
-        locations = [f"stateCd:{code}" for code in postals]
+        # to_state returns a str (scalar) or list[str] (iterable); _as_list
+        # normalizes both, keeping this branch the same shape as county/huc.
+        locations = [
+            f"stateCd:{code}" for code in _as_list(to_state(state, to="postal"))
+        ]
     elif county is not None:
         locations = [f"countyCd:{_validate_county(c)}" for c in _as_list(county)]
     else:
@@ -268,10 +270,9 @@ def _resolve_locations(
 
 def _as_list(value: object) -> list[Any]:
     """A scalar becomes a one-element list; any non-string iterable (list,
-    tuple, Series, ndarray, generator) is materialized to a list."""
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, Iterable):
+    tuple, Series, ndarray, generator) is materialized to a list. A string is
+    treated as a scalar so it isn't exploded into characters."""
+    if isinstance(value, Iterable) and not isinstance(value, str):
         return list(value)
     return [value]
 
@@ -321,7 +322,10 @@ def _fetch_all_pages(
         frame, response = _fetch_page(next_url, None, headers, ssl_check)
         frames.append(frame)
         next_url = _next_page_url(response)
-    return pd.concat(frames, ignore_index=True), first_response
+    # Avoid re-copying the (often whole) single-page result, matching the
+    # per-location concat in get_wateruse.
+    df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+    return df, first_response
 
 
 def _fetch_page(
