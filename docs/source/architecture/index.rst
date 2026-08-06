@@ -151,8 +151,10 @@ contracts; consistency alone is not sufficient reason for a breaking change.
 
 Failed requests derive from ``dataretrieval.DataRetrievalError``. Callers can
 inspect ``status_code``, ``retry_after``, and ``retryable`` without knowing the
-concrete subtype. OGC calls may raise ``ChunkInterrupted`` subclasses carrying a
-resumable call handle and completed partial state.
+concrete subtype. A fanned-out call -- an over-large OGC request, or a Water Use
+query naming several locations -- may raise ``FanOutInterrupted`` subclasses
+(formerly, and still aliased as, ``ChunkInterrupted``) carrying a resumable call
+handle and completed partial state.
 
 The public surface is defined by package/module exports and documentation.
 Underscore-prefixed symbols are implementation details even where existing

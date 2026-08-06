@@ -1913,7 +1913,7 @@ def test_retryable_skips_wrapped_midpagination_transient():
 
 
 def test_retry_transient_then_recovers(monkeypatch):
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _aiozero)
     calls = {"n": 0}
 
     async def afn():
@@ -1928,7 +1928,7 @@ def test_retry_transient_then_recovers(monkeypatch):
 
 
 def test_retry_exhausted_reraises(monkeypatch):
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _aiozero)
     calls = {"n": 0}
 
     async def afn():
@@ -1943,7 +1943,7 @@ def test_retry_exhausted_reraises(monkeypatch):
 def test_retry_non_retryable_not_retried(monkeypatch):
     slept: list[float] = []
 
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _recording_sleep(slept))
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _recording_sleep(slept))
     calls = {"n": 0}
 
     async def afn():
@@ -1958,7 +1958,7 @@ def test_retry_non_retryable_not_retried(monkeypatch):
 def test_retry_long_retry_after_escalates(monkeypatch):
     slept: list[float] = []
 
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _recording_sleep(slept))
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _recording_sleep(slept))
     calls = {"n": 0}
 
     async def afn():
@@ -1974,7 +1974,7 @@ def test_retry_long_retry_after_escalates(monkeypatch):
 
 
 def test_retry_transient_then_success(monkeypatch):
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _aiozero)
     calls = {"n": 0}
 
     async def afn():
@@ -1994,7 +1994,7 @@ def test_chunker_retries_transient_then_completes(monkeypatch):
     """A transient on one sub-request is retried transparently; the
     decorated call completes with no ChunkInterrupted."""
     monkeypatch.setenv("API_USGS_RETRIES", "3")
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _aiozero)
     state = {"failed": False}
 
     async def fetch(args):
@@ -2033,7 +2033,7 @@ def test_chunker_exhausted_retries_still_resumable(monkeypatch):
     """When retries are exhausted the failure still surfaces as a
     resumable ChunkInterrupted — retries don't swallow the escape hatch."""
     monkeypatch.setenv("API_USGS_RETRIES", "2")
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _aiozero)
     attempts = {"n": 0}
 
     async def fetch(args):
@@ -2054,7 +2054,7 @@ def test_async_fan_out_retries_transient_then_completes(monkeypatch):
     """The parallel path retries a transient sub-request and completes."""
     monkeypatch.setenv("API_USGS_RETRIES", "3")
 
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _aiozero)
     state = {"failed": False}
 
     async def fetch_async(args):
@@ -2073,7 +2073,7 @@ def test_async_fan_out_surfaces_fatal_over_transient(monkeypatch):
     being masked behind a resumable interruption from a transient sibling."""
     monkeypatch.setenv("API_USGS_RETRIES", "2")
 
-    monkeypatch.setattr(_chunking.asyncio, "sleep", _aiozero)
+    monkeypatch.setattr(_retry_mod.asyncio, "sleep", _aiozero)
 
     async def fetch_async(args):
         # One chunk carries a deterministic programmer error; the rest are

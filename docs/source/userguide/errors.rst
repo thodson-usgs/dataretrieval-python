@@ -71,30 +71,37 @@ honoring the server's ``Retry-After`` hint when present:
                 raise
             time.sleep(e.retry_after or 2 ** attempt)
 
-Resume a large Water Data request
-=================================
+Resume an interrupted request
+=============================
 
-The Water Data getters transparently split an over-large request into chunks.
-When a transient failure interrupts one mid-stream, the work already completed
-is preserved: catch ``ChunkInterrupted`` and call ``exc.call.resume()`` once the
-condition clears -- only the unfinished sub-requests are re-issued.
+Some requests become several: the Water Data and NGWMN getters split an
+over-large request into chunks, and a Water Use call with several locations
+becomes one request per location. When a transient failure interrupts one
+mid-stream, the work already completed is preserved: catch
+``FanOutInterrupted`` and call ``exc.call.resume()`` once the condition clears
+-- only the unfinished sub-requests are re-issued.
+
+(``ChunkInterrupted`` is the same class under its original name; either works.)
 
 .. code-block:: python
 
     import time
-    from dataretrieval import ChunkInterrupted
+    from dataretrieval import FanOutInterrupted
     from dataretrieval.waterdata import get_daily
 
     try:
         df, md = get_daily(monitoring_location_id=long_list_of_sites)
-    except ChunkInterrupted as exc:
+    except FanOutInterrupted as exc:
         while True:
             time.sleep(exc.retry_after or 5 * 60)
             try:
                 df, md = exc.call.resume()
                 break
-            except ChunkInterrupted as again:
+            except FanOutInterrupted as again:
                 exc = again
+
+The same loop works for ``wateruse.get_wateruse`` with a list of states,
+counties, or HUCs.
 
 Chunk a large request more finely
 =================================
