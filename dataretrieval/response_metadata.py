@@ -66,3 +66,8 @@ class BaseMetadata:
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(url={self.url})"
+
+
+# Pickles created after this class moved must remain readable by releases where
+# its public import path was only ``dataretrieval.utils.BaseMetadata``.
+BaseMetadata.__module__ = "dataretrieval.utils"

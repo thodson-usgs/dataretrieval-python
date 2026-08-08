@@ -110,8 +110,8 @@ Shared components
     contract; ``retry`` classifies failures into OGC interruption types; and
     ``shaping``, ``dates``, ``filters``, and ``errors`` isolate their named
     protocol concerns. The full runtime OGC graph, including the facade, is
-    acyclic — enforced package-wide by the ``acyclic`` contract in
-    ``.importlinter``.
+    acyclic — enforced by the package-wide fitness function in
+    ``tests/architecture_test.py``.
 
 ``dataretrieval.transport``
     Internal service-neutral execution layer. Owns guarded client lifecycle and
@@ -157,9 +157,11 @@ top-level module fails the contract until it is placed, so where a module
 belongs is decided when it is added rather than inferred later.
 
 ``tests/architecture_test.py`` complements those contracts without repeating
-them. It covers the rules an import graph cannot express — which symbols cross
-a seam, declared ``__all__`` surfaces, the AST shape of a facade, and imports
-that must exist rather than be forbidden.
+their direction rules. It covers which symbols cross a seam, declared
+``__all__`` surfaces, the AST shape of a facade, imports that must exist rather
+than be forbidden, and full-graph cycle detection. The last remains a test
+because Import Linter's sibling-cycle contract cannot see a cycle between a
+package facade and one of its descendants.
 
 Interface view
 --------------

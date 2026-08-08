@@ -1,11 +1,9 @@
-"""Executable fitness functions for architecture rules the import graph cannot
-express.
+"""Executable fitness functions that complement the dependency contracts.
 
-Plain dependency direction -- who may import whom, in which direction, without
-cycles -- is declared in ``.importlinter`` and checked by ``lint-imports`` in
-pre-commit and CI. Those rules used to be asserted here too, and are not any
-more: one rule enforced in two places is one rule that gets updated in one
-place.
+Plain dependency direction -- who may import whom, and in which direction -- is
+declared in ``.importlinter`` and checked by ``lint-imports`` in pre-commit and
+CI. Those rules used to be asserted here too, and are not any more: one rule
+enforced in two places is one rule that gets updated in one place.
 
 What remains is everything a boundary checker cannot see, because an import
 graph has no opinion about it:
@@ -18,7 +16,9 @@ graph has no opinion about it:
 * the AST shape of a module, such as a facade proving it contains no logic, or
   a call proving it passes a destination URL;
 * an import that must *exist*: ``lint-imports`` can forbid an edge, never
-  require one.
+  require one;
+* package-wide acyclicity: Import Linter's ``acyclic_siblings`` contract does
+  not detect cycles between a package facade and one of its descendants.
 
 Adding a rule here that is purely about module-to-module direction is a
 regression -- put it in ``.importlinter`` instead.
@@ -27,6 +27,7 @@ regression -- put it in ``.importlinter`` instead.
 from __future__ import annotations
 
 import ast
+import configparser
 import functools
 import sys
 from pathlib import Path
@@ -48,6 +49,12 @@ def _module_name(path: Path) -> str:
     return ".".join(parts)
 
 
+@functools.cache
+def _package_modules() -> frozenset[str]:
+    """Return every importable module implemented by this package."""
+    return frozenset(_module_name(path) for path in PACKAGE_ROOT.rglob("*.py"))
+
+
 def _is_type_checking(test: ast.expr) -> bool:
     """Whether an ``if`` condition is ``TYPE_CHECKING``."""
     return (
@@ -65,15 +72,23 @@ def _is_type_checking(test: ast.expr) -> bool:
 def _resolve_from(current_module: str, path: Path, node: ast.ImportFrom) -> list[str]:
     """Resolve one absolute or relative ``from`` import to module names."""
     if node.level == 0:
-        return [node.module] if node.module else [alias.name for alias in node.names]
+        base_module = node.module or ""
+    else:
+        current_parts = current_module.split(".")
+        package_parts = (
+            current_parts if path.name == "__init__.py" else current_parts[:-1]
+        )
+        base = package_parts[: len(package_parts) - (node.level - 1)]
+        base_module = ".".join([*base, *([node.module] if node.module else [])])
 
-    current_parts = current_module.split(".")
-    package_parts = current_parts if path.name == "__init__.py" else current_parts[:-1]
-    ascend = node.level - 1
-    base = package_parts[: len(package_parts) - ascend]
-    if node.module:
-        return [".".join([*base, node.module])]
-    return [".".join([*base, alias.name]) for alias in node.names]
+    dependencies: set[str] = set()
+    for alias in node.names:
+        candidate = ".".join(part for part in (base_module, alias.name) if part)
+        if candidate in _package_modules():
+            dependencies.add(candidate)
+        elif base_module:
+            dependencies.add(base_module)
+    return sorted(dependencies)
 
 
 class _RuntimeImportVisitor(ast.NodeVisitor):
@@ -108,6 +123,16 @@ def _runtime_imports(path: Path) -> set[str]:
     return visitor.modules
 
 
+@functools.cache
+def _package_import_graph() -> dict[str, set[str]]:
+    """Return runtime edges between modules that belong to this package."""
+    paths = sorted(PACKAGE_ROOT.rglob("*.py"))
+    return {
+        _module_name(path): _runtime_imports(path) & _package_modules()
+        for path in paths
+    }
+
+
 def _literal_exports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
@@ -128,6 +153,29 @@ def test_exceptions_has_no_runtime_third_party_dependency() -> None:
         "dataretrieval.exceptions gained runtime third-party dependencies: "
         f"{sorted(third_party)}"
     )
+
+
+def test_runtime_import_graph_is_acyclic() -> None:
+    """The complete runtime module graph, including facades, must be a DAG."""
+    graph = _package_import_graph()
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(module: str, path: tuple[str, ...]) -> None:
+        if module in visiting:
+            start = path.index(module)
+            cycle = (*path[start:], module)
+            raise AssertionError(f"Runtime import cycle: {' -> '.join(cycle)}")
+        if module in visited:
+            return
+        visiting.add(module)
+        for dependency in graph[module]:
+            visit(dependency, (*path, module))
+        visiting.remove(module)
+        visited.add(module)
+
+    for module in graph:
+        visit(module, ())
 
 
 def test_engine_request_import_surface_does_not_grow() -> None:
@@ -164,6 +212,16 @@ def test_engine_request_import_surface_does_not_grow() -> None:
 
 
 # --- Seams that are about symbols and call sites, not module direction ---
+
+
+def test_ngwmn_uses_ogc_facade() -> None:
+    """NGWMN must retain its positive dependency on the public OGC facade."""
+    ngwmn_imports = _runtime_imports(PACKAGE_ROOT / "ngwmn.py")
+    assert "dataretrieval.ogc" in ngwmn_imports, (
+        "NGWMN must retain its dependency on the OGC facade; internal OGC "
+        "imports are forbidden separately by .importlinter. "
+        f"Found: {sorted(ngwmn_imports)}"
+    )
 
 
 def test_waterdata_utils_is_not_an_ogc_reexport_hub() -> None:
@@ -333,6 +391,23 @@ _WATERDATA_FAMILIES = (
     "waterdata/samples.py",
     "waterdata/cql.py",
 )
+
+
+def test_waterdata_family_contract_covers_every_facade_family() -> None:
+    """The dependency contract and facade inventory must change together."""
+    config = configparser.ConfigParser()
+    config.read(PACKAGE_ROOT.parent / ".importlinter")
+    configured = set(
+        config["importlinter:contract:waterdata-families"]["modules"].split()
+    )
+    expected = {
+        "dataretrieval." + relative.removesuffix(".py").replace("/", ".")
+        for relative in _WATERDATA_FAMILIES
+    }
+    assert configured == expected, (
+        "Water Data facade families differ from the independence contract: "
+        f"configured={sorted(configured)}, expected={sorted(expected)}"
+    )
 
 
 def _top_level_definitions(path: Path) -> set[str]:
