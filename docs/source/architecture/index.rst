@@ -110,7 +110,8 @@ Shared components
     contract; ``retry`` classifies failures into OGC interruption types; and
     ``shaping``, ``dates``, ``filters``, and ``errors`` isolate their named
     protocol concerns. The full runtime OGC graph, including the facade, is
-    acyclic — enforced by ``tests/architecture_test.py``.
+    acyclic — enforced package-wide by the ``acyclic`` contract in
+    ``.importlinter``.
 
 ``dataretrieval.transport``
     Internal service-neutral execution layer. Owns guarded client lifecycle and
@@ -142,12 +143,16 @@ The intended direction is::
                                              -> third-party library / network
 
 Dependencies must not point from shared infrastructure back to a public service
-adapter. The executable checks in ``tests/architecture_test.py`` enforce the
-rules that hold today and explicitly list temporary variances. ``.importlinter``
-declares the same direction as a layer stack, which ``lint-imports`` checks over
-the transitive import graph; it also refuses to pass when a new top-level module
-has not been placed in the stack, so where a module belongs is decided when it
-is added rather than inferred later.
+adapter. ``.importlinter`` declares this as a layer stack and ``lint-imports``
+checks it over the transitive import graph, so a violation routed through an
+intermediary fails as surely as a direct one. The stack is exhaustive: a new
+top-level module fails the contract until it is placed, so where a module
+belongs is decided when it is added rather than inferred later.
+
+``tests/architecture_test.py`` complements those contracts without repeating
+them. It covers the rules an import graph cannot express — which symbols cross
+a seam, declared ``__all__`` surfaces, the AST shape of a facade, and imports
+that must exist rather than be forbidden.
 
 Interface view
 --------------
@@ -269,9 +274,8 @@ and request shapes differ.
 Known architectural debt
 ------------------------
 
-This view records categories and representative locations of debt. The fitness
-functions in ``tests/architecture_test.py`` are authoritative for exact current
-dependency allowlists.
+This view records categories and representative locations of debt.
+``.importlinter`` is authoritative for exact current dependency allowlists.
 
 - ``ogc/engine.py`` retains compatibility wrappers alongside OGC orchestration.
 - ``utils.py`` combines metadata, shaping, ambient configuration, legacy

@@ -64,11 +64,14 @@ metrics = [
   "import-linter==2.13",
 ]
 # The periodic deep sweep (clone detection, dead code, CBO/LCOM, module
-# communities). Separate from ``metrics`` on purpose: ``pyscn`` ships a compiled
-# Go binary with wheels only for macOS arm64, Linux x86_64, and Windows amd64,
-# so folding it into the extra every contributor is told to install would break
-# ``pip install -e .[metrics]`` on an Intel Mac or an aarch64 box. Nothing gates
-# on it -- see ``.github/workflows/code-health.yml``.
+# communities). Kept separate from ``metrics`` for two reasons. ``pyscn`` ships a
+# compiled Go binary with wheels for only macOS arm64, Linux x86_64, and Windows
+# amd64 -- notably not linux/aarch64, which is what a container built on an Apple
+# Silicon machine and an ARM CI runner both are, so folding it in would break
+# ``pip install -e .[metrics]`` there. And ``metrics`` is what the blocking CI
+# job and every contributor installs; a gate is better off with a small,
+# pure-Python dependency set and boring failure modes. Nothing gates on ``pyscn``
+# -- see ``.github/workflows/code-health.yml``.
 health = [
   "pyscn==1.29.0",
 ]
