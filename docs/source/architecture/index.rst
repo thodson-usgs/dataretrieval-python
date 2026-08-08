@@ -143,7 +143,11 @@ The intended direction is::
 
 Dependencies must not point from shared infrastructure back to a public service
 adapter. The executable checks in ``tests/architecture_test.py`` enforce the
-rules that hold today and explicitly list temporary variances.
+rules that hold today and explicitly list temporary variances. ``.importlinter``
+declares the same direction as a layer stack, which ``lint-imports`` checks over
+the transitive import graph; it also refuses to pass when a new top-level module
+has not been placed in the stack, so where a module belongs is decided when it
+is added rather than inferred later.
 
 Interface view
 --------------
@@ -284,7 +288,8 @@ Architecturally significant changes should:
 
 #. add or supersede an ADR;
 #. identify affected characteristics and trade-offs;
-#. add or update an executable fitness function;
+#. add or update an executable fitness function, and the matching contract in
+   ``.importlinter`` when the change moves a dependency boundary;
 #. preserve public contracts or provide a deprecation path; and
 #. update this view when component responsibilities or dependency rules change.
 

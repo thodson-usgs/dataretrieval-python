@@ -49,6 +49,14 @@ that hold today. Its allowlist is the authoritative inventory of exact temporary
 cross-boundary imports; this ADR owns the direction and rationale rather than a
 second copy of that mutable inventory.
 
+``.importlinter`` states the same direction as a layer stack, checked by
+``lint-imports`` over the transitive import graph in pre-commit and CI. The two
+checks are complementary rather than redundant: the fitness functions assert
+named pairwise claims and can say why a specific edge is forbidden, while the
+layer contract covers every pair in the stack at once — including a violation
+routed through intermediaries, which no pairwise assertion sees. Both must be
+updated when a boundary legitimately moves.
+
 Focused fitness functions verify the current boundaries: NGWMN's only OGC
 dependency is the facade, ``waterdata.utils`` does not bulk re-export private
 OGC helpers, ``ogc.shaping`` does not depend on ``ogc.engine``, Water Use has

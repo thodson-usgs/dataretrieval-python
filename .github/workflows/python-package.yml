@@ -50,6 +50,20 @@ jobs:
         # here with the offending block named. Mirrors the xenon pre-commit
         # hook, so a contributor sees the same verdict before pushing.
         run: xenon --max-absolute C --max-modules B --max-average A dataretrieval
+      - name: Cognitive complexity gate
+        # The other half of the ratchet. Cyclomatic complexity counts branches;
+        # cognitive complexity weights nesting and non-linear control flow, so
+        # the two catch different regressions -- a wide flat dispatch fails
+        # xenon and passes here, deep nesting the reverse. 36 is the package's
+        # current maximum, and the pre-commit hook uses the same number.
+        run: complexipy --max-complexity-allowed 36 --failed dataretrieval
+      - name: Dependency-direction contracts
+        # Layer stack from ADRs 0003/0005/0006/0007, checked over the
+        # transitive import graph. tests/architecture_test.py enforces the
+        # named pairwise claims; this catches the indirect route -- a leaf that
+        # reaches a service through two intermediaries breaks the contract here
+        # while every pairwise assertion still passes.
+        run: lint-imports
       - name: Complexity trend vs base
         # Advisory: reports which files moved and by how much, so a reviewer
         # can see direction rather than a pass/fail. Never fails the build --

@@ -1,0 +1,110 @@
+# Periodic structural sweep of the package.
+#
+# Separated from the push suite for the same reason the live API tests are: the
+# signal is real but it is not a per-commit verdict. These analyses answer
+# "where is this codebase drifting?" -- duplication, coupling, cohesion,
+# dependency depth, maintainability trend -- and the honest answer moves over
+# months, not commits. Gating on them would either be noise (a threshold nobody
+# agreed to) or theatre (a threshold loose enough to always pass).
+#
+# The merge gates live in python-package.yml: xenon and complexipy for
+# complexity, lint-imports for dependency direction. Everything here is
+# advisory, and the job never fails on findings.
+#
+# The report is written to the run summary and uploaded as an artifact, so a
+# reviewer -- or an agent asked "what should we clean up next?" -- has one place
+# to look that is not a local install.
+
+name: Code Health
+
+on:
+  schedule:
+    # 08:00 UTC Mondays: a week's worth of merges, read before the week starts.
+    - cron: "0 8 * * 1"
+  # On demand, for checking whether a refactor actually moved the numbers.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # wily indexes git history; a shallow clone gives it one revision to
+          # trend against, which is no trend at all.
+          fetch-depth: 0
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install analysis tooling
+        # ``health`` carries pyscn, which ships platform-specific wheels; this
+        # runner is one of the three platforms it publishes for.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[metrics,health]
+
+      - name: Structural analysis (pyscn)
+        # Clone detection, dead code, class coupling (CBO), class cohesion
+        # (LCOM4), module dependencies, and an aggregate health score, written
+        # into .pyscn/reports/. One output format per invocation, so this runs
+        # twice (about a second each): JSON for anything reading the numbers,
+        # HTML for anyone reading the report. ``continue-on-error`` because a
+        # non-zero exit here means "findings", and findings are the point --
+        # the gates that block a merge live in python-package.yml.
+        continue-on-error: true
+        run: |
+          pyscn analyze --json --no-open dataretrieval | tee pyscn-summary.txt
+          pyscn analyze --html --no-open dataretrieval >/dev/null
+
+      - name: Maintainability ranking (wily)
+        # Which files are worst-maintained today, and how the package has moved
+        # over the last 50 commits. Never a verdict on any one change.
+        run: |
+          wily build dataretrieval --max-revisions 50 >/dev/null 2>&1 || true
+          {
+            echo '## Maintainability ranking'
+            echo '```'
+            wily rank dataretrieval maintainability.mi 2>&1 | head -25 \
+              || echo 'wily index unavailable'
+            echo '```'
+          } > wily-summary.txt
+
+      - name: Publish report
+        # ``if: always()`` so a tool that changed its exit conventions still
+        # leaves the partial report behind rather than a bare red X.
+        if: always()
+        run: |
+          {
+            echo '## Structural analysis'
+            echo '```'
+            cat pyscn-summary.txt 2>/dev/null || echo 'pyscn produced no output'
+            echo '```'
+            cat wily-summary.txt 2>/dev/null || true
+            echo
+            echo 'Full HTML and JSON reports are attached to this run as the'
+            echo '`code-health-report` artifact. Findings here are advisory:'
+            echo 'the merge gates are xenon, complexipy, and lint-imports in'
+            echo 'the Python package workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-health-report
+          path: |
+            .pyscn/reports/
+            pyscn-summary.txt
+            wily-summary.txt
+          retention-days: 90
+          if-no-files-found: warn
