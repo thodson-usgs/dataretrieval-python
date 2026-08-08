@@ -27,7 +27,7 @@ layers =
     utils
     transport
     progress
-    codes | combining | rdb
+    codes | combining | rdb | response_metadata
     credentials
     exceptions
 ; Every top-level module must be placed in the stack deliberately. A new

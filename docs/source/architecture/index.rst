@@ -127,11 +127,18 @@ Shared components
     Stable error-policy leaf. It has no runtime third-party dependency, and
     every service can import it without creating an infrastructure cycle.
 
+``dataretrieval.response_metadata``
+    ``BaseMetadata``, the second half of every getter's ``(DataFrame,
+    metadata)`` return contract. A dependency-free leaf: nearly every service
+    module needs this class, and while it lived in ``utils`` beside the legacy
+    query machinery, importing it pulled that module's whole HTTP stack in
+    transitively.
+
 ``dataretrieval.utils``
-    Shared metadata, data-shaping helpers, ambient context support, legacy
-    request composition, and compatibility imports for transport names that
-    historically lived here. By default, do not add new service-specific
-    behavior there.
+    Data-shaping helpers, ambient context support, legacy request composition,
+    and compatibility imports for transport names that historically lived here
+    (including ``BaseMetadata``, so its original import path keeps working). By
+    default, do not add new service-specific behavior there.
 
 ``dataretrieval.codes`` and ``dataretrieval.rdb``
     State/time-zone code conversion and RDB parsing leaves.
