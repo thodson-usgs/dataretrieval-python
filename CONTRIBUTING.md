@@ -123,7 +123,7 @@ mypy
 coverage run -m pytest tests/
 coverage report -m
 xenon --max-absolute C --max-modules B --max-average A dataretrieval
-complexipy --max-complexity-allowed 36 --failed dataretrieval
+complexipy --max-complexity-allowed 27 --failed dataretrieval
 lint-imports
 ```
 

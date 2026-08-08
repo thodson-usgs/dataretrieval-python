@@ -48,30 +48,18 @@ dataretrieval = ["py.typed"]
 type-check = [
   "mypy",
 ]
-# Structural gates and history, all of them pure-Python and installable
-# everywhere the package is. ``xenon`` fails a build when cyclomatic complexity
-# regresses and ``complexipy`` does the same for cognitive complexity -- they
-# disagree usefully, since a flat dispatch table scores badly on the first and
-# well on the second, and a deeply nested loop the reverse. ``import-linter``
-# holds the layer stack over the transitive import graph. ``wily`` tracks the
-# trend across commits so a review can say whether a change moved the codebase,
-# not just whether it passed. Kept out of ``test`` so the test job stays lean --
-# the metrics job installs this instead.
+# Structural gates (complexity ratchets, dependency contracts) and the wily
+# trend history. Pure-Python, so it installs anywhere the package does. Kept out
+# of ``test`` so the test job stays lean; see CONTRIBUTING.md for what each does.
 metrics = [
   "xenon==0.9.3",
   "wily==1.25.0",
   "complexipy==6.2.0",
   "import-linter==2.13",
 ]
-# The periodic deep sweep (clone detection, dead code, CBO/LCOM, module
-# communities). Kept separate from ``metrics`` for two reasons. ``pyscn`` ships a
-# compiled Go binary with wheels for only macOS arm64, Linux x86_64, and Windows
-# amd64 -- notably not linux/aarch64, which is what a container built on an Apple
-# Silicon machine and an ARM CI runner both are, so folding it in would break
-# ``pip install -e .[metrics]`` there. And ``metrics`` is what the blocking CI
-# job and every contributor installs; a gate is better off with a small,
-# pure-Python dependency set and boring failure modes. Nothing gates on ``pyscn``
-# -- see ``.github/workflows/code-health.yml``.
+# Advisory weekly deep sweep -- see .github/workflows/code-health.yml. Separate
+# from ``metrics`` because pyscn is a compiled binary with no linux/aarch64
+# wheel, and the extra the merge gates depend on should stay pure-Python.
 health = [
   "pyscn==1.29.0",
 ]
