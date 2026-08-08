@@ -51,6 +51,30 @@ jobs:
           pyscn analyze --json --no-open dataretrieval | tee pyscn-summary.txt
           pyscn analyze --html --no-open dataretrieval >/dev/null
 
+      - name: Check the analysis actually resolved the package
+        # pyscn infers a project root, and when it guesses wrong it silently
+        # resolves only a fraction of the imports -- which *raises* the score,
+        # because most of what it grades is dependency-derived. A degraded run
+        # therefore looks like an improved one. Record the resolved edge count
+        # next to the score so that is visible rather than flattering.
+        if: always()
+        continue-on-error: true
+        run: |
+          python - <<'PY' > pyscn-sanity.txt
+          import glob, json, os
+          reports = sorted(glob.glob(".pyscn/reports/*.json"))
+          if not reports:
+              print("no pyscn JSON report found"); raise SystemExit
+          s = json.load(open(reports[-1]))["system"]["Summary"]
+          root, deps = s["ProjectRoot"], s["TotalDependencies"]
+          print(f"modules={s['TotalModules']} resolved_dependencies={deps} root={root}")
+          if os.path.realpath(root) != os.path.realpath(os.getcwd()):
+              print(f"WARNING: project root {root!r} is not the checkout; "
+                    "import resolution is probably degraded and the scores "
+                    "above are not comparable to previous runs.")
+          PY
+          cat pyscn-sanity.txt
+
       - name: Maintainability ranking (wily)
         # Worst-maintained files today, and how the package has moved recently.
         run: |
@@ -71,6 +95,7 @@ jobs:
             echo '## Structural analysis'
             echo '```'
             cat pyscn-summary.txt 2>/dev/null || echo 'pyscn produced no output'
+            cat pyscn-sanity.txt 2>/dev/null || true
             echo '```'
             cat wily-summary.txt 2>/dev/null || true
             echo
