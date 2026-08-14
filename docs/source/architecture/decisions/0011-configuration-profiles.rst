@@ -211,10 +211,11 @@ Satisfied. In ``tests/configuration_test.py``:
   blast-radius rule under lazy validation.
 - ``test_base_url_applies_from_code_and_is_refused_from_the_file``, with
   ``test_base_url_is_refused_from_the_environment`` for the other source, and
-  ``test_every_water_data_endpoint_use_goes_through_redirected`` -- an AST scan
-  over ``dataretrieval/waterdata`` for the one adapter that cannot resolve its
-  base at a single choke point, so a family module cannot quietly keep sending
-  traffic to the host a caller redirected away from.
+  ``test_a_code_base_url_redirects_every_water_data_endpoint_family`` -- one
+  public-getter contract covering OGC, Samples, Statistics, and Ratings. The
+  endpoint module exposes request-time acquisition functions rather than raw
+  usable endpoints, so a family module gets the active scoped root without a
+  wrapper obligation at every use site.
 - ``test_adapter_roster_names_real_modules_that_register_themselves`` and
   ``test_every_adapter_is_actually_wired_to_a_read_site`` -- the roster
   resolves, and no configuration exists that nothing reads. An adapter name

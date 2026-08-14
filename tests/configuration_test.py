@@ -23,7 +23,7 @@ from dataretrieval.ngwmn import NgwmnConfiguration
 from dataretrieval.nwdc import DEFAULT_CONCURRENT_REQUESTS, NwdcConfiguration
 from dataretrieval.streamstats import StreamstatsConfiguration
 from dataretrieval.utils import _default_headers
-from dataretrieval.waterdata import WaterdataConfiguration, endpoints
+from dataretrieval.waterdata import WaterdataConfiguration
 from dataretrieval.wqp import WqpConfiguration
 
 WATERDATA_URL = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/daily/items"
@@ -1424,95 +1424,33 @@ def test_base_url_is_refused_from_the_environment(monkeypatch):
     assert "only be set in code" in out.getvalue()
 
 
-def test_a_water_data_redirect_moves_every_endpoint_family():
-    """Water Data is one adapter serving four APIs, so all four move together.
+def test_a_code_base_url_redirects_every_water_data_endpoint_family(httpx_mock):
+    """One Water Data configuration moves every endpoint family together."""
+    httpx_mock.add_response(json=_DAILY_PAGE)
+    httpx_mock.add_response(json={"data": []})
+    httpx_mock.add_response(json={"features": []})
+    httpx_mock.add_response(json={"features": []})
 
-    A redirect that reached the OGC collections but left samples, statistics,
-    and ratings on the service's own host would send most of a caller's traffic
-    to the host they were redirecting away from -- the one mistake a redirect
-    must not make.
-    """
     with dataretrieval.configure(WaterdataConfiguration(base_url=_MIRROR)):
-        moved = {
-            name: endpoints.redirected(getattr(endpoints, name))
-            for name in ("OGC_API_URL", "SAMPLES_URL", "STATISTICS_API_URL", "STAC_URL")
-        }
+        waterdata.get_daily(monitoring_location_id="USGS-05427718")
+        waterdata.get_codes("states")
+        waterdata.get_stats_por(
+            monitoring_location_id="USGS-05427718",
+            parameter_code="00060",
+            start_date="01-01",
+            end_date="01-01",
+        )
+        waterdata.get_ratings(
+            monitoring_location_id="USGS-05427718",
+            download_and_parse=False,
+        )
 
-    assert moved == {
-        "OGC_API_URL": f"{_MIRROR}/ogcapi/v0",
-        "SAMPLES_URL": f"{_MIRROR}/samples-data",
-        "STATISTICS_API_URL": f"{_MIRROR}/statistics/v0",
-        "STAC_URL": f"{_MIRROR}/stac/v0",
-    }
-    # Outside the block the constants are the service's own again.
-    assert endpoints.redirected(endpoints.OGC_API_URL) == endpoints.OGC_API_URL
-
-    # The swap is a prefix swap, so an endpoint declared on some other root
-    # would be rewritten into nonsense rather than moved. Derived from the
-    # module's exports so a fifth family added later is covered the day it
-    # lands, which the four literals above cannot be.
-    declared = [n for n in endpoints.__all__ if n.endswith("_URL") and n != "BASE_URL"]
-    assert declared and all(
-        getattr(endpoints, name).startswith(endpoints.BASE_URL) for name in declared
-    )
-
-
-def test_every_water_data_endpoint_use_goes_through_redirected():
-    """``redirected()`` is a wrap-at-every-use-site seam, so check every site.
-
-    Water Data is the one adapter that cannot resolve its base at a single
-    choke point: four families hang off one root, each building its own URL
-    from a constant. The test above proves the constants all derive from
-    ``BASE_URL``; this one proves the *use sites* actually pass them through
-    the wrapper. Without it a new family module -- or a second use of an
-    existing constant -- would send traffic to api.waterdata.usgs.gov from
-    inside a block a caller opened precisely to avoid it, with nothing failing:
-    what ``redirected()``'s own docstring calls the one mistake a redirect must
-    not make.
-
-    Written as an AST scan for the same reason as
-    ``test_every_adapter_is_actually_wired_to_a_read_site``: the invariant is a
-    fact about the source, and nothing at runtime can observe a use site that
-    was simply never written.
-    """
-    import ast
-    import pathlib
-
-    wrapped = {n for n in endpoints.__all__ if n.endswith("_URL")}
-    package = pathlib.Path(endpoints.__file__).parent
-
-    bare: list[str] = []
-    for path in sorted(package.rglob("*.py")):
-        if path.name == "endpoints.py":
-            continue  # where the constants are declared and the wrapper lives
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        # Every ``redirected(X)`` argument is a legitimate use; anything else
-        # naming a constant is not. Collected first so the walk below can tell
-        # the two apart by node identity rather than by position.
-        allowed = {
-            node.args[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "redirected"
-            and node.args
-        }
-        for node in ast.walk(tree):
-            # Loads only: the ``from ... import`` that binds the name and the
-            # ``__all__`` re-export (a string, not a Name) are not use sites.
-            if (
-                isinstance(node, ast.Name)
-                and isinstance(node.ctx, ast.Load)
-                and node.id in wrapped
-                and node not in allowed
-            ):
-                bare.append(f"{path.name}:{node.lineno}: {node.id}")
-
-    assert not bare, (
-        "Water Data endpoint constants used without redirected(): "
-        f"{bare}. Wrap each one -- redirected(OGC_API_URL) -- or the request "
-        "ignores WaterdataConfiguration(base_url=...)."
-    )
+    requested = [str(request.url) for request in httpx_mock.get_requests()]
+    assert requested[0].startswith(f"{_MIRROR}/ogcapi/v0/collections/daily/items")
+    assert requested[1].startswith(f"{_MIRROR}/samples-data/codeservice/states")
+    assert requested[2].startswith(f"{_MIRROR}/statistics/v0/observationNormals")
+    assert requested[3].startswith(f"{_MIRROR}/stac/v0/search")
+    assert all(_WATERDATA_RE.match(url) is None for url in requested)
 
 
 def test_a_code_base_url_redirects_the_adapters_requests(httpx_mock):
@@ -1536,7 +1474,7 @@ def test_a_code_base_url_redirects_the_adapters_requests(httpx_mock):
     direct_url = str(httpx_mock.get_requests()[-1].url)
 
     assert redirected_url.startswith(f"{_MIRROR}/ogcapi/v0/collections/daily/items")
-    assert direct_url.startswith(f"{endpoints.OGC_API_URL}/collections/daily/items")
+    assert direct_url.startswith(WATERDATA_URL)
 
     streamstats_mirror = "https://mirror.example/streamstats"
     with dataretrieval.configure(StreamstatsConfiguration(base_url=streamstats_mirror)):

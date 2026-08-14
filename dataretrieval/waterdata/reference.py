@@ -14,14 +14,11 @@ import pandas as pd
 
 from dataretrieval._validation import require_one_of
 from dataretrieval.ogc.schema import queryables_frame
-from dataretrieval.waterdata.endpoints import redirected
+from dataretrieval.waterdata.endpoints import ogc_api_url
 from dataretrieval.waterdata.types import (
     METADATA_COLLECTIONS,
 )
-from dataretrieval.waterdata.utils import (
-    OGC_API_URL,
-    get_ogc_data,
-)
+from dataretrieval.waterdata.utils import get_ogc_data
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
@@ -164,7 +161,7 @@ def get_queryables(collection: str) -> tuple[pd.DataFrame, BaseMetadata]:
     # names the API to ask -- which is the redirected one when a ``configure``
     # block set a base URL, so the queryables describe the API the getters are
     # actually querying.
-    return queryables_frame(collection, base_url=redirected(OGC_API_URL))
+    return queryables_frame(collection, base_url=ogc_api_url())
 
 
 __all__ = ["get_reference_table", "get_queryables"]

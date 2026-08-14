@@ -17,50 +17,51 @@ from __future__ import annotations
 from dataretrieval import configuration as _configuration
 from dataretrieval.credentials import WATERDATA_BASE_URL
 
-#: Root of the modernized Water Data APIs.
-BASE_URL = WATERDATA_BASE_URL
+#: Canonical paths below the Water Data root. They are not endpoints on their
+#: own: callers obtain complete destinations through the functions below, which
+#: makes scoped redirection part of endpoint acquisition rather than a wrapper
+#: every use site must remember.
+_OGC_API_PATH = "/ogcapi/v0"
+_SAMPLES_PATH = "/samples-data"
+_STATISTICS_API_PATH = "/statistics/v0"
+_RATINGS_CATALOG_PATH = "/stac/v0"
 
-#: OGC API - Features service backing the typed collection getters.
-OGC_API_URL = f"{BASE_URL}/ogcapi/v0"
-
-#: Samples database (discrete water-quality results, WQX3 CSV).
-SAMPLES_URL = f"{BASE_URL}/samples-data"
-
-#: Daily-statistics service (period-of-record and date-range normals).
-STATISTICS_API_VERSION = "v0"
-STATISTICS_API_URL = f"{BASE_URL}/statistics/{STATISTICS_API_VERSION}"
-
-#: STAC catalog serving NWIS rating-curve assets.
-STAC_URL = f"{BASE_URL}/stac/v0"
+# Default-value compatibility for the documented ``waterdata.utils`` constants.
+# Production collection-family modules do not import these raw values.
+_DEFAULT_BASE_URL = WATERDATA_BASE_URL
+_DEFAULT_OGC_API_URL = f"{_DEFAULT_BASE_URL}{_OGC_API_PATH}"
+_DEFAULT_SAMPLES_URL = f"{_DEFAULT_BASE_URL}{_SAMPLES_PATH}"
 
 
-def redirected(endpoint: str) -> str:
-    """Move one endpoint onto the base URL a ``configure`` block set, if any.
+def _endpoint(path: str) -> str:
+    """Return *path* beneath the effective Water Data root for this call."""
+    root = _configuration.base_url(adapter="waterdata", default=WATERDATA_BASE_URL)
+    return f"{root}{path}"
 
-    Water Data is one adapter serving four families -- OGC, samples,
-    statistics, ratings -- so ``WaterdataConfiguration(base_url=...)`` names the
-    *root* they all hang off, and every constant above is built from
-    :data:`BASE_URL` so that swapping that prefix moves all of them together. A
-    redirect that reached only the family a caller happened to call first would
-    send the rest to the service the caller was trying not to talk to, which is
-    the one mistake a redirect must not make.
 
-    Resolved per call rather than at import, because a ``configure`` block is
-    scoped to a ``with`` statement and delivered through a ``ContextVar``: a
-    constant computed once could only ever describe the process, not the call.
-    """
-    override = _configuration.base_url(adapter="waterdata")
-    if override is None:
-        return endpoint
-    return override + endpoint.removeprefix(BASE_URL)
+def ogc_api_url() -> str:
+    """Return the OGC collections endpoint for the effective configuration."""
+    return _endpoint(_OGC_API_PATH)
+
+
+def samples_url() -> str:
+    """Return the Samples endpoint for the effective configuration."""
+    return _endpoint(_SAMPLES_PATH)
+
+
+def statistics_api_url() -> str:
+    """Return the Statistics endpoint for the effective configuration."""
+    return _endpoint(_STATISTICS_API_PATH)
+
+
+def ratings_catalog_url() -> str:
+    """Return the Ratings catalog endpoint for the effective configuration."""
+    return _endpoint(_RATINGS_CATALOG_PATH)
 
 
 __all__ = [
-    "BASE_URL",
-    "OGC_API_URL",
-    "SAMPLES_URL",
-    "STAC_URL",
-    "STATISTICS_API_URL",
-    "STATISTICS_API_VERSION",
-    "redirected",
+    "ogc_api_url",
+    "ratings_catalog_url",
+    "samples_url",
+    "statistics_api_url",
 ]

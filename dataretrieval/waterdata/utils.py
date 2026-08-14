@@ -28,14 +28,18 @@ from dataretrieval.credentials import refuse_credential_keywords
 from dataretrieval.ogc import OgcDialect, prepare_request_args
 from dataretrieval.ogc import get_ogc_data as _facade_get_ogc_data
 
-# Endpoint constants live in one place for the whole collection; they are re-bound
-# here because ``waterdata.utils.OGC_API_URL`` is a documented path.
+# Default endpoint constants remain at their documented compatibility paths.
+# Production retrieval resolves scoped destinations through ``ogc_api_url``.
 from dataretrieval.waterdata.endpoints import (
-    BASE_URL,
-    OGC_API_URL,
-    SAMPLES_URL,
-    redirected,
+    _DEFAULT_BASE_URL,
+    _DEFAULT_OGC_API_URL,
+    _DEFAULT_SAMPLES_URL,
+    ogc_api_url,
 )
+
+BASE_URL = _DEFAULT_BASE_URL
+OGC_API_URL = _DEFAULT_OGC_API_URL
+SAMPLES_URL = _DEFAULT_SAMPLES_URL
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
@@ -238,11 +242,10 @@ def get_ogc_data(
         collection,
         output_id,
         max_rows=max_rows,
-        # ``redirected`` honors a ``WaterdataConfiguration(base_url=...)`` set
-        # by an enclosing ``configure`` block, and is a no-op otherwise. Called
-        # here rather than bound once at import because the block is scoped to
-        # a ``with`` statement.
-        base_url=redirected(OGC_API_URL),
+        # Endpoint acquisition resolves the active ContextVar at request time;
+        # the documented ``OGC_API_URL`` constant remains the default-value
+        # compatibility path rather than a production request destination.
+        base_url=ogc_api_url(),
         spatial=spatial,
         extra_id_cols=_EXTRA_ID_COLS,
         dialect=WATERDATA_DIALECT,

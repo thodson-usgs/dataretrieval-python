@@ -30,7 +30,7 @@ from dataretrieval.transport.http import (
 from dataretrieval.transport.links import resolve_next_url
 from dataretrieval.transport.pagination import run_paginated
 from dataretrieval.transport.retry import RetryPolicy
-from dataretrieval.waterdata.endpoints import STAC_URL, redirected
+from dataretrieval.waterdata.endpoints import ratings_catalog_url
 
 __all__ = ["get_ratings"]
 
@@ -256,7 +256,7 @@ def _search(
     if bbox is not None:
         query_params["bbox"] = ",".join(map(str, bbox))
 
-    url = f"{redirected(STAC_URL)}/search"
+    url = f"{ratings_catalog_url()}/search"
     req = httpx.Request("GET", url, params=query_params, headers=_default_headers(url))
 
     def parse_response(resp: httpx.Response) -> tuple[pd.DataFrame, str | None]:
@@ -393,7 +393,7 @@ def _download_all(
             )
             # 204: completed, no content.
             return pd.DataFrame(), _inert_response(
-                204, _asset_href(feature) or f"{redirected(STAC_URL)}/search"
+                204, _asset_href(feature) or f"{ratings_catalog_url()}/search"
             )
         out[fid] = df
         return df, _inert_response(

@@ -28,7 +28,7 @@ from dataretrieval.ogc.shaping import (
 )
 from dataretrieval.transport.http import default_headers
 from dataretrieval.transport.pagination import run_paginated
-from dataretrieval.waterdata.endpoints import STATISTICS_API_URL, redirected
+from dataretrieval.waterdata.endpoints import statistics_api_url
 
 __all__ = ["get_data"]
 
@@ -247,7 +247,7 @@ def get_data(
         :doc:`/userguide/errors`).
     """
 
-    url = f"{redirected(STATISTICS_API_URL)}/{service}"
+    url = f"{statistics_api_url()}/{service}"
     req = httpx.Request(
         method="GET",
         url=url,
