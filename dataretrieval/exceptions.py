@@ -18,8 +18,9 @@ the one member that is not a request failure at all: it reports an unusable
 setting or config file, raised from wherever a setting is first resolved --
 which, because resolution is lazy, is inside whichever getter runs first. The
 *warning* side of the taxonomy lives here too: :class:`SkippedItemWarning`
-(specialized by :class:`SkippedRatingWarning`), a per-item skip inside a
-batched retrieval.
+(specialized by :class:`SkippedRatingWarning`) for a per-item skip inside a
+batched retrieval, and :class:`DataCurrencyWarning` for an upstream dataset
+that has stopped being updated.
 
 This module has no third-party runtime dependencies -- ``httpx`` is imported only
 for type checking. Any module can therefore import it without pulling in pandas
@@ -48,6 +49,7 @@ __all__ = [
     "NetworkError",
     "NoSitesError",
     "ConfigurationError",
+    "DataCurrencyWarning",
     "SkippedItemWarning",
     "SkippedRatingWarning",
     "error_for_status",
@@ -306,6 +308,24 @@ class NoSitesError(DataRetrievalError):
             "No sites/data found using the selection criteria specified in "
             f"url: {self.url}"
         )
+
+
+# --- Upstream data currency -----------------------------------------------
+
+
+class DataCurrencyWarning(UserWarning):
+    """An upstream dataset is frozen, retired, or no longer updated.
+
+    Distinct from ``DeprecationWarning``, which promises that a *name in this
+    package* is going away and gives the caller something to migrate to. Here
+    the API is fine and there is nothing to migrate: the service's own data
+    has stopped moving, and only the caller can judge whether that matters.
+
+    It is a ``UserWarning`` for that reason. Emitting it as a
+    ``DeprecationWarning`` meant a downstream project running
+    ``-W error::DeprecationWarning`` -- ordinary CI hygiene -- could not call
+    the affected getters with their default arguments at all.
+    """
 
 
 # --- Skipped work ---------------------------------------------------------

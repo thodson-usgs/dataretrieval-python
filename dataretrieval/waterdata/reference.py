@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, get_args
 
 import pandas as pd
 
+from dataretrieval._validation import require_one_of
 from dataretrieval.ogc.schema import queryables_frame
 from dataretrieval.waterdata.endpoints import redirected
 from dataretrieval.waterdata.types import (
@@ -94,12 +95,7 @@ def get_reference_table(
         ...     query={"id": "00001,00002"},
         ... )
     """
-    valid_code_services = get_args(METADATA_COLLECTIONS)
-    if collection not in valid_code_services:
-        raise ValueError(
-            f"Invalid code service: '{collection}'. "
-            f"Valid options are: {valid_code_services}."
-        )
+    require_one_of(collection, get_args(METADATA_COLLECTIONS), name="collection")
 
     # Give the ID column the collection name, singularized and underscored.
     if collection == "counties":
@@ -113,7 +109,11 @@ def get_reference_table(
     if limit is not None:
         query_args["limit"] = limit
     return get_ogc_data(
-        args=query_args, output_id=output_id, collection=collection, max_rows=max_rows
+        args=query_args,
+        output_id=output_id,
+        collection=collection,
+        max_rows=max_rows,
+        spatial=False,
     )
 
 

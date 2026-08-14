@@ -6,6 +6,7 @@ from pandas import DataFrame
 
 import dataretrieval
 import dataretrieval.wqp as wqp
+from dataretrieval.exceptions import DataCurrencyWarning
 from dataretrieval.wqp import (
     WQP_Metadata,
     _check_kwargs,
@@ -127,7 +128,7 @@ def test_get_results_WQX3(httpx_mock):
             wqp.wqp_url,
             "Result",
             "https://www.waterqualitydata.us/data/Result/Search?",
-            DeprecationWarning,
+            DataCurrencyWarning,
         ),
         (
             wqp.wqx3_url,
@@ -153,7 +154,7 @@ def test_a_configured_base_url_moves_both_interfaces():
     mirror = "https://mirror.example/wqp"
 
     with dataretrieval.configure(wqp.WqpConfiguration(base_url=mirror)):
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(DataCurrencyWarning):
             legacy = wqp.wqp_url("Result")
         with pytest.warns(UserWarning):
             wqx3 = wqp.wqx3_url("Result")
@@ -163,29 +164,30 @@ def test_a_configured_base_url_moves_both_interfaces():
 
     # Outside the block, the portal's own root again -- the redirect is scoped
     # to the ``with`` statement, not latched at import.
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(DataCurrencyWarning):
         assert wqp.wqp_url("Result").startswith("https://www.waterqualitydata.us/")
 
 
 @pytest.mark.parametrize(
     ("builder", "profile", "valid_services", "warning"),
     [
-        (wqp.wqp_url, "Legacy", wqp.services_legacy, DeprecationWarning),
+        (wqp.wqp_url, "Legacy", wqp.services_legacy, DataCurrencyWarning),
         (wqp.wqx3_url, "WQX3.0", wqp.services_wqx3, UserWarning),
     ],
 )
 def test_wqp_url_profiles_reject_unknown_service(
     builder, profile, valid_services, warning
 ):
-    """Shared validation preserves profile-specific error text and ordering."""
+    """Shared validation names the offending service and its profile."""
     with pytest.warns(warning):
         with pytest.raises(
             ValueError,
-            match=rf"^{profile} service not recognized\. Valid options are ",
+            match=rf"^Invalid service: 'unknown' for {profile}\. Valid options are: ",
         ) as exc_info:
             builder("unknown")
 
-    assert str(valid_services) in str(exc_info.value)
+    # Every valid service is offered, in declaration order.
+    assert ", ".join(repr(s) for s in valid_services) in str(exc_info.value)
 
 
 # Every WQP ``what_*`` wrapper issues the same query against its own service

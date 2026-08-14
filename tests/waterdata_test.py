@@ -419,13 +419,13 @@ def test_get_cql_service_keyword_is_deprecated_but_works():
     The rename must not silently change behavior for callers using the old name.
     """
     with pytest.warns(DeprecationWarning, match="use 'collection'"):
-        with pytest.raises(ValueError, match="Unknown collection"):
+        with pytest.raises(ValueError, match="Invalid collection"):
             get_cql(service="not-a-collection", cql="a=1")
 
     # The new spelling emits nothing.
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
-        with pytest.raises(ValueError, match="Unknown collection"):
+        with pytest.raises(ValueError, match="Invalid collection"):
             get_cql(collection="not-a-collection", cql="a=1")
 
     # Passing both spellings is ambiguous and refused, which the hand-rolled
@@ -436,7 +436,7 @@ def test_get_cql_service_keyword_is_deprecated_but_works():
 
 def test_get_cql_unknown_service_raises():
     """An unknown collection is rejected before any network call."""
-    with pytest.raises(ValueError, match="Unknown collection"):
+    with pytest.raises(ValueError, match="Invalid collection"):
         get_cql("not-a-collection", {"op": "isNull", "args": [{"property": "x"}]})
 
 
@@ -760,6 +760,29 @@ def test_get_daily_no_geometry(httpx_mock):
     assert "geometry" not in df.columns
     assert isinstance(df, DataFrame)
     assert _sent(httpx_mock, "daily")[0]["skipGeometry"] == ["true"]
+
+
+def test_get_daily_empty_no_geometry(httpx_mock):
+    """An empty skip-geometry request has the same plain shape as a hit."""
+    httpx_mock.add_response(
+        method="GET",
+        url=_schema_url("daily"),
+        json={
+            "properties": {
+                "geometry": {},
+                "id": {},
+                "monitoring_location_id": {},
+                "value": {},
+            }
+        },
+    )
+    _mock_items(httpx_mock, "daily", body={"features": [], "links": []})
+
+    df, _ = get_daily(monitoring_location_id="USGS-NOT-FOUND", skip_geometry=True)
+
+    assert type(df) is DataFrame
+    assert "geometry" not in df.columns
+    assert {"monitoring_location_id", "value"}.issubset(df.columns)
 
 
 def test_get_continuous(httpx_mock):
@@ -1135,6 +1158,18 @@ def test_get_reference_table(httpx_mock):
     assert "agency_code" in df.columns
     assert df.shape[0] == 2
     assert hasattr(md, "url") and hasattr(md, "query_time")
+
+
+def test_get_reference_table_rejects_unknown_collection_by_its_own_name(httpx_mock):
+    """The rejection names ``collection`` -- the parameter actually passed.
+
+    Regression: this check was copied from ``get_codes``, message and local
+    variable name included, so a bad ``collection=`` was reported as an
+    invalid *code service* -- a parameter this function does not have.
+    """
+    with pytest.raises(ValueError, match="Invalid collection: 'agency-codez'"):
+        get_reference_table("agency-codez")
+    assert not httpx_mock.get_requests(), "must reject before issuing a request"
 
 
 def test_get_reference_table_with_query(httpx_mock):

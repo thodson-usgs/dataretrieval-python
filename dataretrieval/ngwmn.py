@@ -120,6 +120,7 @@ def _get(service: str, local_vars: dict[str, Any]) -> tuple[pd.DataFrame, BaseMe
         # scoped to a ``with`` statement, and read here because this is the one
         # place the NGWMN base is named.
         base_url=_configuration.base_url(adapter="ngwmn", default=NGWMN_OGC_API_URL),
+        spatial=service == "sites",
         dialect=NGWMN_DIALECT,
         adapter="ngwmn",
     )

@@ -19,6 +19,7 @@ import pandas as pd
 
 from dataretrieval import configuration as _configuration
 from dataretrieval._response_metadata import BaseMetadata
+from dataretrieval._validation import require_one_of
 from dataretrieval.configuration import (
     BaseConfiguration,
     _Redirectable,
@@ -26,6 +27,7 @@ from dataretrieval.configuration import (
     _Retrying,
 )
 from dataretrieval.credentials import refuse_credential_keywords
+from dataretrieval.exceptions import DataCurrencyWarning
 
 from ._querying import _query_with_retry
 from ._wqx import _attach_datetime_columns
@@ -206,10 +208,9 @@ def get_results(
         url = wqx3_url("Result")
 
     profile = kwargs.get("dataProfile")
-    if profile is not None and profile not in valid_profiles:
-        raise ValueError(
-            f"dataProfile {profile!r} is not a valid {kind} profile. "
-            f"Valid options are {valid_profiles}."
+    if profile is not None:
+        require_one_of(
+            profile, valid_profiles, name="dataProfile", context=f"{kind} results"
         )
     if legacy is not True and profile is None:
         kwargs["dataProfile"] = "fullPhysChem"
@@ -641,10 +642,7 @@ def what_activity_metrics(
 
 def _validate_service(service: str, valid_services: list[str], profile: str) -> None:
     """Validate a service against one WQP profile's supported endpoints."""
-    if service not in valid_services:
-        raise ValueError(
-            f"{profile} service not recognized. Valid options are {valid_services}."
-        )
+    require_one_of(service, valid_services, name="service", context=profile)
 
 
 def _service_base() -> str:
@@ -771,7 +769,7 @@ def _warn_legacy_use() -> None:
         "information on updated WQX3.0 profiles. Setting `legacy=False` "
         "will remove this warning."
     )
-    warnings.warn(message, DeprecationWarning, stacklevel=2)
+    warnings.warn(message, DataCurrencyWarning, stacklevel=2)
 
 
 def _warn_wqx3_unavailable() -> None:
@@ -789,14 +787,15 @@ def _legacy_only_url(service: str, legacy: bool) -> str:
 
     Passing ``legacy=False`` to one of these helpers emits a ``UserWarning``
     explaining the fallback and *also* suppresses the legacy
-    ``DeprecationWarning`` that ``wqp_url`` would otherwise raise. That
-    warning's message claims setting ``legacy=False`` removes it, which is
-    a lie for endpoints that have no WQX3.0 alternative.
+    :class:`~dataretrieval.exceptions.DataCurrencyWarning` that ``wqp_url``
+    would otherwise raise. That warning's message claims setting
+    ``legacy=False`` removes it, which is a lie for endpoints that have no
+    WQX3.0 alternative.
     """
     with warnings.catch_warnings():
         if not legacy:
             _warn_wqx3_unavailable()
-            warnings.simplefilter("ignore", DeprecationWarning)
+            warnings.simplefilter("ignore", DataCurrencyWarning)
         return wqp_url(service)
 
 

@@ -33,6 +33,7 @@ from dataretrieval.ogc.errors import (
 from dataretrieval.ogc.schema import _check_ogc_requests
 from dataretrieval.ogc.shaping import (
     _arrange_cols,
+    _deal_with_empty,
     _get_resp_data,
     _to_snake_case,
 )
@@ -54,6 +55,8 @@ _finalize_ogc = functools.partial(
     extra_id_cols=_EXTRA_ID_COLS,
     dialect=WATERDATA_DIALECT,
     base_url=OGC_API_URL,
+    geopd=False,
+    include_geometry=True,
 )
 
 _LOGGER_NAME = _utils_module.__name__
@@ -606,6 +609,66 @@ def test_handle_nesting_empty_preserves_geopd_type():
     assert isinstance(result, _Sentinel)
 
 
+def test_empty_result_uses_request_geometry_contract():
+    """All-empty shaping follows the request mode, not the template class."""
+    with_geometry = _deal_with_empty(
+        pd.DataFrame(),
+        ["a", "b"],
+        "daily",
+        base_url="x",
+        geopd=False,
+        include_geometry=True,
+    )
+    without_geometry = _deal_with_empty(
+        pd.DataFrame(),
+        ["a", "geometry", "b"],
+        "daily",
+        base_url="x",
+        geopd=False,
+        include_geometry=False,
+    )
+
+    assert type(with_geometry) is pd.DataFrame
+    assert list(with_geometry.columns) == ["a", "b", "geometry"]
+    assert all(dtype.kind == "O" for dtype in with_geometry.dtypes)
+    assert list(without_geometry.columns) == ["a", "b"]
+
+
+@pytest.mark.skipif(not _shaping_module.GEOPANDAS, reason="requires geopandas")
+def test_empty_result_matches_a_non_empty_geodataframe():
+    """An empty geospatial result remains usable like a non-empty one."""
+    import geopandas as gpd
+
+    response = _resp_ok([])
+    page = _get_resp_data(response, geopd=True)
+    template = pd.concat([page], ignore_index=True)
+    out = _deal_with_empty(
+        template,
+        ["monitoring_location_id"],
+        "daily",
+        base_url="x",
+        geopd=True,
+        include_geometry=True,
+    )
+
+    assert isinstance(template, gpd.GeoDataFrame)
+    assert isinstance(out, gpd.GeoDataFrame) and out.empty
+    assert out["monitoring_location_id"].dtype == object
+    assert out.geometry is not None
+    assert out.crs == "EPSG:4326"
+    out["monitoring_location_id"].str.startswith("USGS")
+    out.to_crs("EPSG:3857")
+    real = gpd.GeoDataFrame(
+        {
+            "monitoring_location_id": ["USGS-1"],
+            "geometry": gpd.points_from_xy([1], [2]),
+        },
+        crs="EPSG:4326",
+    )
+    combined = pd.concat([out, real], ignore_index=True)
+    assert isinstance(combined, gpd.GeoDataFrame) and combined.crs == "EPSG:4326"
+
+
 def test_get_resp_data_empty_preserves_geopd_type():
     """Same as the stats-side preservation: ``_get_resp_data``'s
     ``numberReturned == 0`` short-circuit must return a
@@ -626,6 +689,27 @@ def test_get_resp_data_empty_preserves_geopd_type():
     with mock.patch.object(_shaping_module, "gpd", fake_gpd, create=True):
         result = _get_resp_data(resp, geopd=True)
     assert isinstance(result, _Sentinel)
+
+
+@pytest.mark.skipif(not _shaping_module.GEOPANDAS, reason="requires geopandas")
+def test_get_resp_data_keeps_one_geospatial_type_when_geometry_is_missing():
+    """A spatial request cannot change frame family based on page contents."""
+    import geopandas as gpd
+
+    empty = _get_resp_data(_resp_ok([]), geopd=True)
+    missing = _get_resp_data(
+        _resp_ok([{"id": "1", "properties": {"value": 1}}]),
+        geopd=True,
+    )
+
+    assert isinstance(empty, gpd.GeoDataFrame)
+    assert isinstance(missing, gpd.GeoDataFrame)
+    assert missing.geometry.isna().all()
+    for pages in ([empty, missing], [missing, empty]):
+        combined = pd.concat(pages, ignore_index=True)
+        assert isinstance(combined, gpd.GeoDataFrame)
+        assert combined.geometry.name == "geometry"
+        assert combined.crs == "EPSG:4326"
 
 
 def test_get_resp_data_attaches_wgs84_crs():
@@ -941,6 +1025,99 @@ def test_raise_for_non_200_attaches_retry_after_to_rate_limited():
     with pytest.raises(RateLimited) as excinfo:
         _raise_for_non_200(resp)
     assert excinfo.value.retry_after == 60.0
+
+
+def test_403_reports_the_services_own_reason():
+    """A 403 envelope must reach the user rather than a canned guess.
+
+    The message was fixed text naming only "query exceeding server limits",
+    and never read the body -- so a revoked ``API_USGS_PAT``, the most common
+    real 403, was reported as a query-size problem.
+    """
+    resp = _make_response(
+        403,
+        '{"code": "Forbidden", "description": "API key revoked"}',
+        reason="Forbidden",
+        content_type="application/json",
+    )
+    with pytest.raises(HTTPError) as excinfo:
+        _raise_for_non_200(resp)
+    assert "API key revoked" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ('{"message": "API key is invalid"}', "403: API key is invalid."),
+        (
+            '{"error": {"code": "API_KEY_INVALID", '
+            '"message": "An invalid api_key was supplied"}}',
+            "403: API_KEY_INVALID. An invalid api_key was supplied.",
+        ),
+        (
+            '{"code": "Forbidden", "description": null, "message": "API key revoked"}',
+            "403: Forbidden. API key revoked.",
+        ),
+        (
+            '{"code": "Forbidden", "description": "", "message": "API key revoked"}',
+            "403: Forbidden. API key revoked.",
+        ),
+    ],
+    ids=(
+        "flat-message",
+        "nested-live-envelope",
+        "null-description",
+        "empty-description",
+    ),
+)
+def test_403_with_a_gateway_json_message_shows_the_message(body, expected):
+    """Gateway JSON errors are rendered deliberately, not as raw JSON."""
+    resp = _make_response(
+        403,
+        body,
+        reason="Forbidden",
+        content_type="application/json",
+    )
+    with pytest.raises(HTTPError) as excinfo:
+        _raise_for_non_200(resp)
+    message = str(excinfo.value)
+    assert message == expected
+    assert "{" not in message
+
+
+def test_403_with_a_non_json_body_shows_it_like_any_other_status():
+    """A WAF 403 is plain text; discarding it was the bug this PR fixes, so
+    403 shares the snippet path rather than having its own."""
+    resp = _make_response(403, "Access Denied: API key revoked", reason="Forbidden")
+    with pytest.raises(HTTPError) as excinfo:
+        _raise_for_non_200(resp)
+    assert "API key revoked" in str(excinfo.value)
+
+
+def test_403_without_an_envelope_names_the_credential_cause():
+    """With no body to quote, both plausible causes are offered."""
+    resp = _make_response(403, "", reason="Forbidden")
+    with pytest.raises(HTTPError) as excinfo:
+        _raise_for_non_200(resp)
+    message = str(excinfo.value)
+    assert "API_USGS_PAT" in message and "server limits" in message
+
+
+def test_error_messages_name_the_url():
+    """Without the URL a failed chunk in a fan-out cannot be traced back to
+    the request that produced it -- the message is all the interruption
+    carries."""
+    request = httpx.Request("GET", "https://api.waterdata.usgs.gov/ogcapi/v0/x")
+    resp = httpx.Response(400, content=b"", request=request)
+    with pytest.raises(HTTPError) as excinfo:
+        _raise_for_non_200(resp)
+    assert "https://api.waterdata.usgs.gov/ogcapi/v0/x" in str(excinfo.value)
+
+
+def test_error_message_survives_a_response_with_no_request():
+    """An error path must not fail while reporting a failure."""
+    with pytest.raises(HTTPError):
+        _raise_for_non_200(_make_response(400, "", reason="Bad Request"))
 
 
 def test_raise_for_non_200_400_raises_http_error():

@@ -52,6 +52,7 @@ except PackageNotFoundError:
 from dataretrieval.configuration import Configuration, configure, show_configuration
 from dataretrieval.exceptions import (
     ConfigurationError,
+    DataCurrencyWarning,
     DataRetrievalError,
     HTTPError,
     NetworkError,
@@ -112,6 +113,7 @@ __all__ = [
     # error taxonomy (canonical home: ``dataretrieval.exceptions``), re-exported
     # so callers can ``except dataretrieval.DataRetrievalError``
     "exceptions",
+    "DataCurrencyWarning",
     "DataRetrievalError",
     "HTTPError",
     "NetworkError",

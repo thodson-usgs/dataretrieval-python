@@ -17,12 +17,12 @@ this module as a re-export layer.
 from __future__ import annotations
 
 import functools
-import warnings
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import pandas as pd
 
+from dataretrieval._deprecation import warn_deprecated
 from dataretrieval.codes.states import apply_state
 from dataretrieval.credentials import refuse_credential_keywords
 from dataretrieval.ogc import OgcDialect, prepare_request_args
@@ -191,6 +191,8 @@ def get_ogc_data(
     output_id: str | None = None,
     max_rows: int | None = None,
     cql_body: str | None = None,
+    *,
+    spatial: bool = True,
 ) -> tuple[pd.DataFrame, BaseMetadata]:
     """Water-Data wrapper over :func:`~dataretrieval.ogc.get_ogc_data`.
 
@@ -217,6 +219,9 @@ def get_ogc_data(
     cql_body : str, optional
         A verbatim CQL2 JSON body to POST instead of building the query from
         ``args`` (see the facade's ``cql_body``). Used by :func:`get_cql`.
+    spatial : bool, optional
+        Whether the collection carries feature geometry. Water Data's typed
+        feature collections do; reference tables pass ``False``.
 
     Returns
     -------
@@ -238,6 +243,7 @@ def get_ogc_data(
         # here rather than bound once at import because the block is scoped to
         # a ``with`` statement.
         base_url=redirected(OGC_API_URL),
+        spatial=spatial,
         extra_id_cols=_EXTRA_ID_COLS,
         dialect=WATERDATA_DIALECT,
         cql_body=cql_body,
@@ -256,6 +262,7 @@ def _accept_legacy_kwargs(
     mapping: Mapping[str, str],
     *,
     detail: str = "",
+    removal: str | None = None,
 ) -> Callable[[Callable[..., _R]], Callable[..., _R]]:
     """Accept deprecated keyword-argument names on the decorated function.
 
@@ -273,7 +280,10 @@ def _accept_legacy_kwargs(
     intentionally relaxed (the wrapper accepts the extra deprecated names),
     so static checkers won't flag legacy call sites.
 
-    ``detail`` appends a sentence to the warning. The default message says only
+    ``removal`` is the published horizon (from
+    :data:`~dataretrieval._deprecation.REMOVALS`); ``None`` reads as "a future
+    release". ``detail`` appends a sentence to the warning. The default
+    message says only
     that the name changed; a rename with a reason worth giving -- a spec that
     names the value differently, a removal date -- passes it here rather than
     hand-rolling the whole shim to carry one sentence.
@@ -297,13 +307,11 @@ def _accept_legacy_kwargs(
                         f"{func.__name__}() received both {old_name!r} "
                         f"(deprecated) and {new_name!r}; pass only {new_name!r}."
                     )
-                message = (
-                    f"The {old_name!r} argument is deprecated and will be "
-                    f"removed in a future release; use {new_name!r} instead."
-                )
-                warnings.warn(
-                    f"{message} {detail}" if detail else message,
-                    DeprecationWarning,
+                warn_deprecated(
+                    f"The {old_name!r} argument",
+                    replacement=repr(new_name),
+                    removal=removal,
+                    detail=detail,
                     stacklevel=2,
                 )
                 kwargs[new_name] = kwargs.pop(old_name)
