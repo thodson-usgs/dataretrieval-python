@@ -179,42 +179,39 @@ def test_runtime_import_graph_is_acyclic() -> None:
 
 
 def test_config_is_a_standard_library_only_leaf() -> None:
-    """Configuration resolution must stay importable from anywhere.
+    """The two-module configuration subsystem must stay cheap and cycle-safe.
 
-    ``dataretrieval.configuration`` is read by ``utils`` (headers), ``ogc.chunking``
-    (concurrency), ``ogc.retry``, and ``ogc.progress``. If it imported any of
-    them -- or any third-party package -- it would create a cycle or make the
-    cheapest module in the package expensive. ``tomli`` is the one allowed
-    third-party import: it is the ``tomllib`` backport, used only on Python
-    3.10, and the ``sys.version_info`` guard means it is not even imported on
-    3.11+.
-
-    ``dataretrieval.exceptions`` is the one allowed first-party import: it is
-    the taxonomy leaf, itself free of first-party and runtime third-party
-    imports (asserted above), so depending on it adds no weight and cannot
-    cycle. ``ConfigurationError`` lives there because configuration resolves on the
-    request path, so a broken config file must be catchable as
-    ``except DataRetrievalError`` like any other failure of that call.
+    ``dataretrieval.configuration`` remains the public runtime interface and may
+    depend on its private foundation, ``dataretrieval._configuration_core``.
+    The core may depend only on ``dataretrieval.exceptions``. Neither module may
+    reach adapters or runtime third-party packages. ``tomli`` remains the one
+    third-party exception: it is the ``tomllib`` backport used on Python 3.10.
     """
-    imports = _runtime_imports(PACKAGE_ROOT / "configuration.py")
-    first_party = {
-        name
-        for name in imports
-        if name.startswith("dataretrieval") and name != "dataretrieval.exceptions"
+    subsystem = {
+        PACKAGE_ROOT / "configuration.py": {
+            "dataretrieval._configuration_core",
+            "dataretrieval.exceptions",
+        },
+        PACKAGE_ROOT / "_configuration_core.py": {"dataretrieval.exceptions"},
     }
-    assert not first_party, (
-        "dataretrieval.configuration may only import dataretrieval.exceptions: "
-        f"{sorted(first_party)}"
-    )
-    roots = {module.partition(".")[0] for module in imports}
-    # Static analysis sees both sides of the version guard. Python 3.10's
-    # stdlib inventory does not yet include the unreachable ``tomllib`` branch.
-    allowed = {"dataretrieval", "tomli", "tomllib"}
-    third_party = roots - sys.stdlib_module_names - allowed
-    assert not third_party, (
-        "dataretrieval.configuration gained third-party dependencies: "
-        f"{sorted(third_party)}"
-    )
+    for path, allowed_first_party in subsystem.items():
+        imports = _runtime_imports(path)
+        first_party = {name for name in imports if name.startswith("dataretrieval")}
+        unexpected_first_party = first_party - allowed_first_party
+        assert not unexpected_first_party, (
+            f"{_module_name(path)} crossed the configuration subsystem boundary: "
+            f"{sorted(unexpected_first_party)}"
+        )
+
+        roots = {module.partition(".")[0] for module in imports}
+        # Static analysis sees both sides of the version guard. Python 3.10's
+        # stdlib inventory does not yet include the unreachable ``tomllib`` branch.
+        allowed_roots = {"dataretrieval", "tomli", "tomllib"}
+        third_party = roots - sys.stdlib_module_names - allowed_roots
+        assert not third_party, (
+            f"{_module_name(path)} gained third-party dependencies: "
+            f"{sorted(third_party)}"
+        )
 
 
 def test_engine_request_import_surface_does_not_grow() -> None:
