@@ -651,12 +651,11 @@ def config_path() -> Path:
         cached_guard, path = cached[1], cached[2]
         # The memo is only valid while whatever the path was *derived from* is
         # unchanged, so each branch records its own guard. A relative override
-        # is anchored to the working directory (a later ``os.chdir`` in a
-        # per-job notebook or scheduler must not keep reading the previous
-        # job's file); the default branch is anchored to ``$HOME``. An absolute
-        # override depends on neither and guards with ``None``. ``stat(".")``
-        # identifies the directory ~17x cheaper than ``getcwd()``, which
-        # reifies the whole path string.
+        # is anchored to the working directory's pathname: directory identity
+        # is insufficient because renaming the cwd or one of its ancestors
+        # preserves its inode while changing where a relative path resolves.
+        # The default branch is anchored to ``$HOME``. An absolute override
+        # depends on neither and guards with ``None``.
         if cached_guard is None or cached_guard == _path_guard(cached_guard):
             return path
 
@@ -671,8 +670,8 @@ def config_path() -> Path:
         path = expanded
         guard = None
     else:
-        guard = _cwd_id()
-        path = _resolve_against_cwd(expanded)
+        guard = _cwd_path()
+        path = guard / expanded
     _path_cache = (override, guard, path)
     return path
 
@@ -696,44 +695,20 @@ def _default_home_path() -> Path:
     return home / ".dataretrieval" / "config.toml"
 
 
-def _resolve_against_cwd(relative: Path) -> Path:
-    """Resolve a relative override, or report a working directory that is gone.
-
-    A scratch-dir job that removes its own cwd cannot resolve a relative
-    ``DATARETRIEVAL_CONFIG`` at all. That surfaces as a :class:`ConfigurationError`
-    rather than a bare ``OSError`` escaping onto the request path -- the
-    taxonomy contract the rest of this module keeps.
-    """
+def _cwd_path() -> Path:
+    """Return the cwd pathname, or report that a relative path has no anchor."""
     try:
-        return Path.cwd() / relative
-    except OSError as exc:
-        raise ConfigurationError(
-            f"cannot resolve the relative {CONFIG_PATH_ENV} path {str(relative)!r}: "
-            f"the working directory is unavailable ({exc})."
-        ) from exc
-
-
-def _path_guard(previous: object) -> object:
-    """Re-read whichever guard the cached entry was built with."""
-    return _cwd_id() if isinstance(previous, tuple) else _home_id()
-
-
-def _cwd_id() -> tuple[int, int]:
-    """Identify the working directory without building its path string.
-
-    Only identifies the directory; :func:`_resolve_against_cwd` is what turns a
-    missing cwd into a :class:`ConfigurationError`. Both are needed, because ``stat``
-    on a *deleted* working directory still succeeds -- the process holds the
-    open handle -- while resolving its path does not.
-    """
-    try:
-        st = os.stat(".")
+        return Path.cwd()
     except OSError as exc:
         raise ConfigurationError(
             f"cannot resolve the relative {CONFIG_PATH_ENV} path: the working "
             f"directory is unavailable ({exc})."
         ) from exc
-    return (st.st_dev, st.st_ino)
+
+
+def _path_guard(previous: object) -> object:
+    """Re-read whichever guard the cached entry was built with."""
+    return _cwd_path() if isinstance(previous, Path) else _home_id()
 
 
 def _home_id() -> str:
