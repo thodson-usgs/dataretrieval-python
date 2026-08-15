@@ -690,6 +690,64 @@ def test_world_readable_file_with_a_key_warns(tmp_path, monkeypatch):
         assert configuration.api_key() == "secret"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permits renaming an active cwd")
+def test_relative_config_path_follows_a_renamed_working_directory(
+    tmp_path, monkeypatch
+):
+    """A cwd rename must not leave the memo pointing at its former pathname."""
+    original = pathlib.Path.cwd()
+    current = tmp_path / "current"
+    renamed = tmp_path / "renamed"
+    current.mkdir()
+    (current / "config.toml").write_text("concurrency = 7\n")
+    monkeypatch.delenv("API_USGS_CONCURRENT", raising=False)
+    monkeypatch.setenv(configuration.CONFIG_PATH_ENV, "config.toml")
+
+    try:
+        os.chdir(current)
+        configuration._reset_file_cache()
+        assert configuration.concurrency() == 7
+
+        current.rename(renamed)
+
+        assert configuration.config_path() == renamed / "config.toml"
+        assert configuration.concurrency() == 7
+    finally:
+        os.chdir(original)
+        configuration._reset_file_cache()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permits deleting an active cwd")
+def test_cached_relative_config_path_reports_a_deleted_working_directory(
+    tmp_path, monkeypatch
+):
+    """A cached path must not hide that its relative anchor disappeared."""
+    original = pathlib.Path.cwd()
+    current = tmp_path / "current"
+    current.mkdir()
+    path = current / "config.toml"
+    path.write_text("concurrency = 7\n")
+    monkeypatch.delenv("API_USGS_CONCURRENT", raising=False)
+    monkeypatch.setenv(configuration.CONFIG_PATH_ENV, "config.toml")
+
+    try:
+        os.chdir(current)
+        configuration._reset_file_cache()
+        assert configuration.concurrency() == 7
+
+        path.unlink()
+        current.rmdir()
+
+        with pytest.raises(
+            configuration.ConfigurationError,
+            match="working directory is unavailable",
+        ):
+            configuration.config_path()
+    finally:
+        os.chdir(original)
+        configuration._reset_file_cache()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_permission_change_is_checked_on_cached_file(config_file):
     path = config_file('api_key = "secret"\n')
