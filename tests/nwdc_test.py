@@ -995,3 +995,28 @@ def test_an_unknown_package_attribute_still_raises():
     """The lazy hook serves only ``wateruse``; anything else stays an error."""
     with pytest.raises(AttributeError, match="no attribute 'watreuse'"):
         _ = dataretrieval.watreuse
+
+
+def test_wateruse_attribute_warning_is_visible_to_a_plain_script(tmp_path):
+    """The advisory must reach the callers it is for.
+
+    Python's default filters show a ``DeprecationWarning`` only when it is
+    attributed to ``__main__``, and a warning raised from the alias's module
+    body is attributed to that module -- invisible to everyone not running
+    pytest or ``-W``. The package hook is called from the caller's own frame,
+    which is the one place the attribution can be made honest, so this asserts
+    the outcome (a real script prints it) rather than the stacklevel.
+    """
+    import subprocess
+    import sys
+
+    script = tmp_path / "uses_wateruse.py"
+    script.write_text("import dataretrieval\ndataretrieval.wateruse\n")
+
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "DeprecationWarning" in result.stderr
+    assert "uses_wateruse.py:2" in result.stderr, result.stderr

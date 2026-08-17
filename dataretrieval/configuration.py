@@ -247,18 +247,10 @@ def _frame(configurations: tuple[BaseConfiguration, ...]) -> _Frame:
                 "Configuration(...); a setting for one service goes on that "
                 "adapter's configuration, e.g. WaterdataConfiguration(...)."
             )
+        # That ``adapter`` names a real adapter is settled at the class
+        # statement (``BaseConfiguration.__init_subclass__``), so nothing
+        # reaching this loop can carry a typo.
         adapter = configuration.adapter
-        # The same roster check the read sites make (see :func:`_resolve`),
-        # applied where the value *enters*: a subclass whose ``adapter``
-        # ClassVar is a typo would otherwise be accepted here and its settings
-        # would silently never apply -- no table matches the name, and every
-        # read resolves package-wide with nothing raised anywhere.
-        if adapter is not None and adapter not in ADAPTERS:
-            raise ConfigurationError(
-                f"configure() got a {type(configuration).__name__} for "
-                f"{adapter!r}, which is not a configurable adapter. The "
-                f"adapters are {', '.join(ADAPTERS)}."
-            )
         if adapter in seen:
             where = f"the {adapter} adapter" if adapter else "the package-wide settings"
             raise ConfigurationError(

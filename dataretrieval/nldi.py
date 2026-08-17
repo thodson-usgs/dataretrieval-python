@@ -572,12 +572,7 @@ def _validate_data_source(data_source: str) -> None:
         sources = [ds["source"] for ds in available_data_sources]
         _AVAILABLE_DATA_SOURCES[base] = sources
 
-    if data_source not in sources:
-        err_msg = (
-            f"Invalid data source '{data_source}'."
-            f" Available data sources are: {sources}"
-        )
-        raise ValueError(err_msg)
+    require_one_of(data_source, sources, name="data source")
 
 
 def _validate_navigation_mode(navigation_mode: str | None) -> str:

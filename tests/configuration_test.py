@@ -1255,15 +1255,25 @@ def test_adapter_roster_names_real_modules_that_register_themselves():
         assert accepted >= {"retries", "stall_timeout", "base_url"}
 
 
-def test_registering_an_adapter_outside_the_roster_raises():
-    """The roster is the authority, so a class cannot invent an adapter."""
+def test_an_adapter_outside_the_roster_raises_at_the_class_statement():
+    """The roster is the authority, so a class cannot invent an adapter.
 
-    @dataclass(frozen=True)
-    class BogusConfiguration(configuration.BaseConfiguration):
-        adapter: ClassVar[str] = "not-an-adapter"
-
+    Checked where the name is written rather than at registration or at a
+    later ``configure()``: a class that is never registered skips the first,
+    and both run long after the line that got it wrong.
+    """
     with pytest.raises(configuration.ConfigurationError, match="not one of"):
-        configuration._register(BogusConfiguration)
+
+        @dataclass(frozen=True)
+        class BogusConfiguration(configuration.BaseConfiguration):
+            adapter: ClassVar[str] = "not-an-adapter"
+
+
+def test_registering_the_package_wide_configuration_raises():
+    """The one rule registration still owns: ``Configuration`` has no adapter
+    to be registered under, and the registry is keyed by adapter."""
+    with pytest.raises(configuration.ConfigurationError, match="names no adapter"):
+        configuration._register(Configuration)
 
 
 def test_settings_for_an_unimported_adapter_is_not_an_error(monkeypatch):
@@ -2039,20 +2049,16 @@ def test_a_trailing_slash_on_a_configured_base_url_is_stripped():
 
 
 def test_configure_rejects_a_configuration_for_an_unknown_adapter():
-    """The write-side twin of the read-site roster check.
-
-    A subclass whose ``adapter`` ClassVar is a typo used to be accepted
-    silently: no table matches the name, every read resolves package-wide,
-    and the block's settings never apply with nothing raised anywhere.
+    """A typo'd ``adapter`` ClassVar used to be accepted silently: no table
+    matches the name, every read resolves package-wide, and the block's
+    settings apply to nothing with nothing raised anywhere. The class can no
+    longer be *defined*, so no such configuration can reach ``configure()``.
     """
+    with pytest.raises(configuration.ConfigurationError, match="watredata"):
 
-    @dataclass(frozen=True)
-    class TypoConfiguration(configuration.BaseConfiguration):
-        adapter: ClassVar[str] = "watredata"
-
-    with pytest.raises(configuration.ConfigurationError, match="not a configurable"):
-        with dataretrieval.configure(TypoConfiguration()):
-            pass
+        @dataclass(frozen=True)
+        class TypoConfiguration(configuration.BaseConfiguration):
+            adapter: ClassVar[str] = "watredata"
 
 
 def test_the_settings_roster_guard_names_missing_and_extra():
@@ -2061,3 +2067,24 @@ def test_the_settings_roster_guard_names_missing_and_extra():
     drift so the import failure says what to fix."""
     with pytest.raises(RuntimeError, match=r"missing=\['api_key'.*extra=\['bogus'\]"):
         configuration._require_full_coverage({"bogus": object()}, "a test table")
+
+
+def test_a_scheme_with_no_host_is_refused_not_silently_trimmed():
+    """``https://`` -- an f-string over a host variable that was never set --
+    passes a bare scheme check, and stripping the trailing slashes off the
+    whole string would store ``https:``. The failure would then surface far
+    from here as an httpx error naming a URL the caller never typed, which is
+    the class of failure this parser exists to catch."""
+    for degenerate in ("https://", "http://", "https:///"):
+        with pytest.raises(configuration.ConfigurationError, match="absolute"):
+            WaterdataConfiguration(base_url=degenerate)
+
+
+def test_a_base_url_keeps_its_path_when_the_trailing_slash_goes():
+    """Stripping happens past the scheme, so a based-path mirror survives."""
+    with dataretrieval.configure(
+        WaterdataConfiguration(base_url="https://mirror.example/waterdata/")
+    ):
+        assert configuration.base_url(adapter="waterdata") == (
+            "https://mirror.example/waterdata"
+        )

@@ -143,9 +143,17 @@ def __getattr__(name: str) -> ModuleType:
     # ``wateruse`` -- the deprecated alias for ``nwdc`` -- is deliberately not
     # imported above, so ``import dataretrieval`` stays silent. Resolving it
     # here keeps existing ``dataretrieval.wateruse.get_wateruse(...)`` code
-    # working through the alias's DeprecationWarning instead of failing with a
-    # bare AttributeError; the import system then binds the attribute, so the
-    # warning fires once and later access skips this hook.
+    # working instead of failing with a bare AttributeError.
+    #
+    # The advisory is re-emitted from here rather than left to the one the
+    # alias's import fires: this hook is called straight from the caller's
+    # frame, so a stacklevel reaching back through ``_warn`` and this function
+    # attributes the warning to the line that named ``wateruse`` -- which is
+    # what makes it visible at all, since the default filters show a
+    # DeprecationWarning only against ``__main__``. The import system binds
+    # the attribute afterwards, so this runs once per process.
     if name == "wateruse":
-        return import_module("dataretrieval.wateruse")
+        module = import_module("dataretrieval.wateruse")
+        module._warn(stacklevel=3)
+        return module
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

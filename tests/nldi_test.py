@@ -375,7 +375,7 @@ def test_validate_data_source_rejects_invalid_after_cache_populated(httpx_mock):
 
     nldi._validate_data_source("WQP")
 
-    with pytest.raises(ValueError, match="Invalid data source 'not_a_real_source'"):
+    with pytest.raises(ValueError, match="Invalid data source: 'not_a_real_source'"):
         nldi._validate_data_source("not_a_real_source")
 
 
@@ -415,12 +415,11 @@ def test_query_nldi_non_200_raises_typed_error(httpx_mock):
         nldi.get_basin(feature_source="WQP", feature_id="USGS-MISSING")
 
 
-def test_validate_data_source_rejects_malformed_catalog(httpx_mock, monkeypatch):
+def test_validate_data_source_rejects_malformed_catalog(httpx_mock):
     """``_validate_data_source`` should raise ``ValueError`` with an
     informative message if the NLDI base URL returns a non-list shape
     (or a list whose entries don't carry ``source`` keys), instead of
     crashing with ``TypeError: string indices must be integers``."""
-    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", {})
     httpx_mock.add_response(
         method="GET",
         url=f"{NLDI_API_BASE_URL}/",

@@ -314,6 +314,25 @@ class BaseConfiguration:
     #: "a configuration is a value" means.
     profile: ClassVar[str | None] = None
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Check the adapter name at the line that declares it.
+
+        ``adapter`` is a ClassVar, so a typo in it is a source-level mistake
+        whose failure mode is silence: no file table matches the name, every
+        read resolves package-wide, and the class's settings apply to nothing
+        with nothing raised anywhere. Checked here rather than at
+        :func:`_register` (which a class that is never registered skips) or at
+        ``configure()`` (which runs at a later ``with`` statement), matching
+        the rule this class already states for its values -- a typo raises
+        where it was written.
+        """
+        super().__init_subclass__(**kwargs)
+        if cls.adapter is not None and cls.adapter not in ADAPTERS:
+            raise ConfigurationError(
+                f"{cls.__name__}.adapter is {cls.adapter!r}, which is not one "
+                f"of {', '.join(ADAPTERS)}."
+            )
+
     def __post_init__(self) -> None:
         for name, value in self.values().items():
             if value is not None:
@@ -578,16 +597,17 @@ _REGISTRY: dict[str, type[BaseConfiguration]] = {}
 def _register(cls: type[BaseConfiguration]) -> None:
     """Record an adapter's configuration class. Called at adapter import.
 
-    The roster in :data:`ADAPTERS` and the class are the two halves of one
-    declaration, and this is where they are checked to agree: a class naming an
-    adapter the roster does not list would be a configuration no file table and
-    no report could ever reach.
+    That the class names an adapter the roster lists is settled at the class
+    statement by :meth:`BaseConfiguration.__init_subclass__`, so registration
+    is left with the one rule only it can state: the package-wide
+    :class:`Configuration` has no adapter to register under.
     """
     adapter = cls.adapter
-    if adapter is None or adapter not in ADAPTERS:
+    if adapter is None:
         raise ConfigurationError(
-            f"{cls.__name__}.adapter is {adapter!r}, which is not one of "
-            f"{', '.join(ADAPTERS)}."
+            f"{cls.__name__} names no adapter, so it is not one of "
+            f"{', '.join(ADAPTERS)}. Only an adapter's own configuration "
+            f"class is registered."
         )
     _REGISTRY[adapter] = cls
 
@@ -948,22 +968,27 @@ def _parse_concurrency(raw: str, source: str) -> int | None:
 def _parse_base_url(raw: str, source: str) -> str:
     """Parse a service base URL: an absolute ``http``/``https`` origin.
 
-    Only the scheme is checked, and deliberately so. This module cannot know
-    what a given service's paths look like, but it can refuse the shapes that
-    are never a base URL and would fail far from here -- a bare hostname that
-    ``httpx`` would reject, or a ``file://`` that is not a service at all.
+    Only the scheme and the presence of something after it are checked, and
+    deliberately so. This module cannot know what a given service's paths look
+    like, but it can refuse the shapes that are never a base URL and would fail
+    far from here -- a bare hostname that ``httpx`` would reject, or a
+    ``file://`` that is not a service at all.
 
-    A trailing slash is stripped: every consumer appends ``/<path>`` to the
-    value, so ``https://mirror.example/`` -- the natural spelling -- would
-    otherwise build ``https://mirror.example//ogcapi/v0``, a different route
-    to any strict router.
+    A trailing slash is stripped from what follows the scheme: every consumer
+    appends ``/<path>`` to the value, so ``https://mirror.example/`` -- the
+    natural spelling -- would otherwise build
+    ``https://mirror.example//ogcapi/v0``, a different route to any strict
+    router. Stripping past the scheme rather than off the whole string is what
+    keeps ``https://`` a refusal: an f-string over an unset host variable
+    would otherwise pass the scheme check and be stored as ``https:``.
     """
-    value = raw.strip()
-    if not value.startswith(("http://", "https://")):
+    scheme, separator, rest = raw.strip().partition("://")
+    trimmed = rest.rstrip("/")
+    if not separator or scheme not in ("http", "https") or not trimmed:
         raise ConfigurationError(
             f"{source} must be an absolute http:// or https:// URL (got {raw!r})."
         )
-    return value.rstrip("/")
+    return f"{scheme}://{trimmed}"
 
 
 def _parse_progress(raw: str, source: str, *, strict: bool) -> bool:

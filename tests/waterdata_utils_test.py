@@ -1358,3 +1358,30 @@ def test_url_constants_warn_that_rebinding_no_longer_redirects():
             value = getattr(_utils_module, name)
         assert isinstance(value, str)
         assert value.startswith("https://")
+
+
+def test_the_url_constant_advisory_survives_a_monkeypatch_cycle():
+    """``monkeypatch.setattr`` restores by *setting* the attribute back, which
+    would write the name into the module dict and shadow a plain module-level
+    ``__getattr__`` -- delivering the advisory once per process and then
+    silently disabling it for the callers it is aimed at."""
+    monkeypatch = pytest.MonkeyPatch()
+    with pytest.warns(DeprecationWarning, match="OGC_API_URL"):
+        monkeypatch.setattr(_utils_module, "OGC_API_URL", "https://mock.example")
+        assert _utils_module.OGC_API_URL == "https://mock.example"
+    monkeypatch.undo()
+
+    assert "OGC_API_URL" not in vars(_utils_module)
+    with pytest.warns(DeprecationWarning, match="OGC_API_URL"):
+        assert _utils_module.OGC_API_URL.startswith("https://api.waterdata")
+
+
+def test_url_constants_stay_star_importable():
+    """``from ... import *`` binds only what ``__all__`` lists, and reaches a
+    module ``__getattr__`` through it. Dropping the deprecated names would
+    turn the advisory into a bare NameError for exactly those callers."""
+    namespace: dict[str, object] = {}
+    with pytest.warns(DeprecationWarning):
+        exec("from dataretrieval.waterdata.utils import *", namespace)  # noqa: S102
+
+    assert namespace["OGC_API_URL"] == OGC_API_URL

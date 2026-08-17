@@ -17,7 +17,9 @@ this module as a re-export layer.
 from __future__ import annotations
 
 import functools
+import sys
 from collections.abc import Callable, Mapping
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import pandas as pd
@@ -37,13 +39,13 @@ from dataretrieval.waterdata.endpoints import (
     ogc_api_url,
 )
 
-#: The documented URL constants, served lazily by the module ``__getattr__``
-#: below so reading one carries a deprecation advisory. They are static
-#: defaults: requests resolve their destination through ``ogc_api_url`` and
-#: its siblings at call time, so rebinding a constant -- a once-working
-#: redirect/mock technique -- silently reaches no request anymore. The
-#: advisory fires on the read (including ``monkeypatch.setattr``'s presence
-#: check) instead of leaving that discovery to a live query.
+#: The documented URL constants, held here rather than as module globals so
+#: every read and every rebind goes through :class:`_CompatConstants` below.
+#: They are static defaults: requests resolve their destination through
+#: ``ogc_api_url`` and its siblings at call time, so rebinding a constant --
+#: a once-working redirect/mock technique -- silently reaches no request
+#: anymore, and the advisory says so at the rebind instead of leaving the
+#: discovery to a live query.
 _URL_CONSTANTS = {
     "BASE_URL": _DEFAULT_BASE_URL,
     "OGC_API_URL": _DEFAULT_OGC_API_URL,
@@ -51,20 +53,46 @@ _URL_CONSTANTS = {
 }
 
 
-def __getattr__(name: str) -> str:
-    if name in _URL_CONSTANTS:
-        warn_deprecated(
-            f"`dataretrieval.waterdata.utils.{name}`",
-            replacement=(
-                "`configure(WaterdataConfiguration(base_url=...))` to redirect "
-                "requests, or the `waterdata.endpoints` accessors (e.g. "
-                "`ogc_api_url()`) to read the effective endpoint"
-            ),
-            detail="The constant is a static default; rebinding it no longer "
-            "redirects requests.",
-        )
-        return _URL_CONSTANTS[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def _warn_url_constant(name: str) -> None:
+    """Advise that *name* is a static default, not a request destination."""
+    warn_deprecated(
+        f"`dataretrieval.waterdata.utils.{name}`",
+        replacement=(
+            "`configure(WaterdataConfiguration(base_url=...))` to redirect "
+            "requests, or the `waterdata.endpoints` accessors (e.g. "
+            "`ogc_api_url()`) to read the effective endpoint"
+        ),
+        detail="The constant is a static default; rebinding it no longer "
+        "redirects requests.",
+        stacklevel=3,
+    )
+
+
+class _CompatConstants(ModuleType):
+    """Module type that keeps the deprecated URL constants advisory.
+
+    A plain module-level ``__getattr__`` stops being consulted the moment
+    anything writes the name into the module dict -- which is exactly what
+    ``monkeypatch.setattr`` does when it restores the original value on undo.
+    The advisory would then be delivered once per process and silently
+    disabled for the rest of it, for precisely the callers it is aimed at.
+    Keeping the values in :data:`_URL_CONSTANTS` instead of the module dict
+    means a rebind never materializes the name, so reads and rebinds both
+    keep reporting.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        if name in _URL_CONSTANTS:
+            _warn_url_constant(name)
+            return _URL_CONSTANTS[name]
+        raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in _URL_CONSTANTS:
+            _warn_url_constant(name)
+            _URL_CONSTANTS[name] = value
+            return
+        super().__setattr__(name, value)
 
 
 if TYPE_CHECKING:
@@ -351,10 +379,15 @@ def _accept_legacy_kwargs(
     return decorator
 
 
-# ``BASE_URL``/``OGC_API_URL``/``SAMPLES_URL`` are deliberately absent:
-# deprecated names served by the module ``__getattr__`` above stay importable
-# (with their advisory) but are no longer advertised as exports.
+# The three URL constants are served by ``_CompatConstants`` rather than
+# defined here, which ruff cannot see -- hence the F822 suppressions. They stay
+# listed so ``from ... import *`` keeps binding them (star-import reads
+# ``__all__`` and calls ``getattr``, so the advisory still fires); dropping
+# them would turn a deprecation into a bare NameError for those callers.
 __all__ = [
+    "BASE_URL",  # noqa: F822
+    "OGC_API_URL",  # noqa: F822
+    "SAMPLES_URL",  # noqa: F822
     "WATERDATA_DIALECT",
     "_EXTRA_ID_COLS",
     "_NO_NORMALIZE_PARAMS",
@@ -364,3 +397,7 @@ __all__ = [
     "_with_state",
     "get_ogc_data",
 ]
+
+# Last, so the class is in place for every later read or rebind of a
+# deprecated constant.
+sys.modules[__name__].__class__ = _CompatConstants

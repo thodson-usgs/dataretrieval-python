@@ -41,13 +41,28 @@ NWDC_RENAME_REMOVAL_DATE = REMOVALS["wateruse"]
 
 __all__ = list(_nwdc.__all__)
 
-warn_deprecated(
-    "`dataretrieval.wateruse`",
-    replacement="`dataretrieval.nwdc`",
-    removal=NWDC_RENAME_REMOVAL_DATE,
-    detail="The service is the National Water Availability Assessment Data "
-    "Companion, and water use is one of the ten datasets it serves.",
-    # 1 lands the warning on the line that imported this module -- an import
-    # has no deeper user frame to point at.
-    stacklevel=1,
-)
+
+def _warn(stacklevel: int = 1) -> None:
+    """Emit this alias's advisory, attributed *stacklevel* frames up.
+
+    Shared by the two ways the alias is reached, because each can attribute
+    the warning honestly only from where it runs. Importing this module runs
+    the call below, where the importing line is unreachable: the import
+    machinery's own frames sit between it and here, and no fixed stacklevel
+    crosses them across Python versions -- so it points here, which is what
+    the default filters then hide outside ``__main__``. Reaching the alias as
+    ``dataretrieval.wateruse`` instead runs
+    :func:`dataretrieval.__getattr__`, which *is* called straight from the
+    caller's frame and passes a stacklevel that lands there.
+    """
+    warn_deprecated(
+        "`dataretrieval.wateruse`",
+        replacement="`dataretrieval.nwdc`",
+        removal=NWDC_RENAME_REMOVAL_DATE,
+        detail="The service is the National Water Availability Assessment Data "
+        "Companion, and water use is one of the ten datasets it serves.",
+        stacklevel=stacklevel,
+    )
+
+
+_warn()
