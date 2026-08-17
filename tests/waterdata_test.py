@@ -42,9 +42,9 @@ from dataretrieval.waterdata import (
     get_stats_por,
     get_time_series_metadata,
 )
+from dataretrieval.waterdata.endpoints import _DEFAULT_OGC_API_URL as OGC_API_URL
 from dataretrieval.waterdata.types import _check_profiles
 from dataretrieval.waterdata.utils import (
-    OGC_API_URL,
     WATERDATA_DIALECT,
     _get_args,
 )

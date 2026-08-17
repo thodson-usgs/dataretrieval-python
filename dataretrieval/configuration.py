@@ -117,6 +117,7 @@ from dataretrieval._configuration_core import (
     _Redirectable as _Redirectable,
     _register as _register,
     _REGISTRY as _REGISTRY,
+    _require_full_coverage as _require_full_coverage,
     _reset_file_cache as _reset_file_cache,
     _Retrying as _Retrying,
     _scope as _scope,
@@ -247,6 +248,17 @@ def _frame(configurations: tuple[BaseConfiguration, ...]) -> _Frame:
                 "adapter's configuration, e.g. WaterdataConfiguration(...)."
             )
         adapter = configuration.adapter
+        # The same roster check the read sites make (see :func:`_resolve`),
+        # applied where the value *enters*: a subclass whose ``adapter``
+        # ClassVar is a typo would otherwise be accepted here and its settings
+        # would silently never apply -- no table matches the name, and every
+        # read resolves package-wide with nothing raised anywhere.
+        if adapter is not None and adapter not in ADAPTERS:
+            raise ConfigurationError(
+                f"configure() got a {type(configuration).__name__} for "
+                f"{adapter!r}, which is not a configurable adapter. The "
+                f"adapters are {', '.join(ADAPTERS)}."
+            )
         if adapter in seen:
             where = f"the {adapter} adapter" if adapter else "the package-wide settings"
             raise ConfigurationError(
@@ -757,11 +769,4 @@ _DISPLAYS: dict[str, Callable[[str | None], str]] = {
     "base_url": lambda adapter: base_url(adapter=adapter) or "<service default>",
 }
 
-if set(_DISPLAYS) != set(_ALL_SETTINGS):  # pragma: no cover - guards a coding error
-    # Not an ``assert``: ``python -O`` strips those, and this guards the one
-    # report whose whole job is to be trustworthy about provenance.
-    raise RuntimeError(
-        "every setting needs a show_configuration renderer; "
-        f"missing={sorted(set(_ALL_SETTINGS) - set(_DISPLAYS))} "
-        f"extra={sorted(set(_DISPLAYS) - set(_ALL_SETTINGS))}"
-    )
+_require_full_coverage(_DISPLAYS, "a show_configuration renderer")

@@ -2024,3 +2024,40 @@ def test_show_configuration_survives_a_malformed_profile(config_file):
         WaterdataConfiguration.load("bulk")
     with pytest.raises(configuration.ConfigurationError, match="contains a table"):
         NgwmnConfiguration.load("gentle")
+
+
+def test_a_trailing_slash_on_a_configured_base_url_is_stripped():
+    """``base_url="https://mirror.example/"`` is the natural spelling, and
+    every consumer appends ``/<path>``; unstripped, the pair builds
+    ``https://mirror.example//ogcapi/v0`` -- a different route to a strict
+    router, so the redirect would fail on its most common input."""
+    from dataretrieval.waterdata import endpoints
+
+    with dataretrieval.configure(WaterdataConfiguration(base_url=_MIRROR + "/")):
+        assert configuration.base_url(adapter="waterdata") == _MIRROR
+        assert endpoints.ogc_api_url() == f"{_MIRROR}/ogcapi/v0"
+
+
+def test_configure_rejects_a_configuration_for_an_unknown_adapter():
+    """The write-side twin of the read-site roster check.
+
+    A subclass whose ``adapter`` ClassVar is a typo used to be accepted
+    silently: no table matches the name, every read resolves package-wide,
+    and the block's settings never apply with nothing raised anywhere.
+    """
+
+    @dataclass(frozen=True)
+    class TypoConfiguration(configuration.BaseConfiguration):
+        adapter: ClassVar[str] = "watredata"
+
+    with pytest.raises(configuration.ConfigurationError, match="not a configurable"):
+        with dataretrieval.configure(TypoConfiguration()):
+            pass
+
+
+def test_the_settings_roster_guard_names_missing_and_extra():
+    """One guard serves every per-setting table (type policies here, display
+    renderers in ``configuration``); its message must name both directions of
+    drift so the import failure says what to fix."""
+    with pytest.raises(RuntimeError, match=r"missing=\['api_key'.*extra=\['bogus'\]"):
+        configuration._require_full_coverage({"bogus": object()}, "a test table")

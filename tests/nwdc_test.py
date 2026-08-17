@@ -969,3 +969,29 @@ def test_importing_dataretrieval_does_not_warn():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_wateruse_resolves_as_a_package_attribute(monkeypatch):
+    """``import dataretrieval; dataretrieval.wateruse.get_wateruse(...)``
+    keeps working through the alias's deprecation.
+
+    The package deliberately does not import the alias (the subprocess test
+    above pins that), so attribute access resolves it lazily via the package
+    ``__getattr__`` -- the legacy spelling gets the warning and the module,
+    not a bare ``AttributeError``.
+    """
+    import sys
+
+    monkeypatch.delattr(dataretrieval, "wateruse", raising=False)
+    monkeypatch.delitem(sys.modules, "dataretrieval.wateruse", raising=False)
+
+    with pytest.warns(DeprecationWarning, match="`dataretrieval.wateruse`"):
+        alias = dataretrieval.wateruse
+
+    assert alias.get_wateruse is nwdc.get_wateruse
+
+
+def test_an_unknown_package_attribute_still_raises():
+    """The lazy hook serves only ``wateruse``; anything else stays an error."""
+    with pytest.raises(AttributeError, match="no attribute 'watreuse'"):
+        _ = dataretrieval.watreuse

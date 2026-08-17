@@ -18,7 +18,7 @@ from dataretrieval.nldi import (
 @pytest.fixture(autouse=True)
 def _reset_data_source_cache(monkeypatch):
     """Reset the module-level cache between tests."""
-    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", None)
+    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", {})
 
 
 def mock_request_data_sources(httpx_mock):
@@ -420,7 +420,7 @@ def test_validate_data_source_rejects_malformed_catalog(httpx_mock, monkeypatch)
     informative message if the NLDI base URL returns a non-list shape
     (or a list whose entries don't carry ``source`` keys), instead of
     crashing with ``TypeError: string indices must be integers``."""
-    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", None)
+    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", {})
     httpx_mock.add_response(
         method="GET",
         url=f"{NLDI_API_BASE_URL}/",
@@ -473,3 +473,31 @@ def test_a_configured_base_url_redirects_every_nldi_request(httpx_mock):
 
     assert isinstance(gdf, GeoDataFrame)
     assert {str(r.url).startswith(mirror) for r in httpx_mock.get_requests()} == {True}
+
+
+def test_data_source_catalog_is_cached_per_base_url(httpx_mock):
+    """A catalog cached from one host must not validate calls aimed at another.
+
+    ``_api_base()`` re-resolves per call, so a ``configure`` block can redirect
+    it mid-process; the cache therefore keys on the base URL rather than
+    treating the first host's answer as the process-wide truth.
+    """
+    mock_request_data_sources(httpx_mock)
+    mirror = "https://mirror.example/nldi"
+    httpx_mock.add_response(
+        method="GET", url=f"{mirror}/", json=[{"source": "mirror_only"}]
+    )
+
+    nldi._validate_data_source("WQP")  # fills the real-service entry
+
+    with dataretrieval.configure(nldi.NldiConfiguration(base_url=mirror)):
+        nldi._validate_data_source("mirror_only")  # separate fetch and entry
+        with pytest.raises(ValueError, match="Invalid data source"):
+            nldi._validate_data_source("WQP")  # the mirror's catalog lacks it
+
+    # The real-service entry survived the block: still exactly one fetch.
+    nldi._validate_data_source("WQP")
+    catalog_requests = [
+        r for r in httpx_mock.get_requests() if str(r.url) == f"{NLDI_API_BASE_URL}/"
+    ]
+    assert len(catalog_requests) == 1

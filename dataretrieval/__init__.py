@@ -34,7 +34,9 @@ request interrupted mid-stream raises :class:`dataretrieval.FanOutInterrupted`
 ``.call.resume()`` continues from the work already completed.
 """
 
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
+from types import ModuleType
 
 try:
     __version__ = version("dataretrieval")
@@ -135,3 +137,15 @@ __all__ = [
     "parallel_chunks",
     "__version__",
 ]
+
+
+def __getattr__(name: str) -> ModuleType:
+    # ``wateruse`` -- the deprecated alias for ``nwdc`` -- is deliberately not
+    # imported above, so ``import dataretrieval`` stays silent. Resolving it
+    # here keeps existing ``dataretrieval.wateruse.get_wateruse(...)`` code
+    # working through the alias's DeprecationWarning instead of failing with a
+    # bare AttributeError; the import system then binds the attribute, so the
+    # warning fires once and later access skips this hook.
+    if name == "wateruse":
+        return import_module("dataretrieval.wateruse")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

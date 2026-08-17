@@ -37,9 +37,35 @@ from dataretrieval.waterdata.endpoints import (
     ogc_api_url,
 )
 
-BASE_URL = _DEFAULT_BASE_URL
-OGC_API_URL = _DEFAULT_OGC_API_URL
-SAMPLES_URL = _DEFAULT_SAMPLES_URL
+#: The documented URL constants, served lazily by the module ``__getattr__``
+#: below so reading one carries a deprecation advisory. They are static
+#: defaults: requests resolve their destination through ``ogc_api_url`` and
+#: its siblings at call time, so rebinding a constant -- a once-working
+#: redirect/mock technique -- silently reaches no request anymore. The
+#: advisory fires on the read (including ``monkeypatch.setattr``'s presence
+#: check) instead of leaving that discovery to a live query.
+_URL_CONSTANTS = {
+    "BASE_URL": _DEFAULT_BASE_URL,
+    "OGC_API_URL": _DEFAULT_OGC_API_URL,
+    "SAMPLES_URL": _DEFAULT_SAMPLES_URL,
+}
+
+
+def __getattr__(name: str) -> str:
+    if name in _URL_CONSTANTS:
+        warn_deprecated(
+            f"`dataretrieval.waterdata.utils.{name}`",
+            replacement=(
+                "`configure(WaterdataConfiguration(base_url=...))` to redirect "
+                "requests, or the `waterdata.endpoints` accessors (e.g. "
+                "`ogc_api_url()`) to read the effective endpoint"
+            ),
+            detail="The constant is a static default; rebinding it no longer "
+            "redirects requests.",
+        )
+        return _URL_CONSTANTS[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
@@ -325,10 +351,10 @@ def _accept_legacy_kwargs(
     return decorator
 
 
+# ``BASE_URL``/``OGC_API_URL``/``SAMPLES_URL`` are deliberately absent:
+# deprecated names served by the module ``__getattr__`` above stay importable
+# (with their advisory) but are no longer advertised as exports.
 __all__ = [
-    "BASE_URL",
-    "OGC_API_URL",
-    "SAMPLES_URL",
     "WATERDATA_DIALECT",
     "_EXTRA_ID_COLS",
     "_NO_NORMALIZE_PARAMS",

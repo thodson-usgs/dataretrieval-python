@@ -23,6 +23,7 @@ from types import MappingProxyType
 from typing import Any, ClassVar, TypeVar
 
 from dataretrieval._ambient import Ambient
+from dataretrieval._validation import is_integral_count
 from dataretrieval.exceptions import ConfigurationError
 
 #: Settings only an adapter can carry, because they name one service. No
@@ -804,7 +805,9 @@ def _coerce_seconds(value: object, source: str, optional: str) -> str:
 
 
 def _coerce_count(value: object, source: str, optional: str) -> str:
-    if isinstance(value, bool) or not isinstance(value, Integral):
+    # The bool-rejecting Integral rule is shared with the OGC controls via
+    # ``_validation.is_integral_count``, so tightening it reaches both.
+    if not is_integral_count(value):
         raise _type_error(source, "an integer" + optional, value)
     return str(value)
 
@@ -827,14 +830,25 @@ _TYPES: dict[str, Callable[[object, str, str], str]] = {
     "stall_timeout": _coerce_seconds,
 }
 
-if set(_TYPES) != set(_ALL_SETTINGS):  # pragma: no cover - guards a coding error
-    # Not an ``assert``: ``python -O`` strips those, and an unlisted setting
-    # would otherwise change meaning by omission.
+
+def _require_full_coverage(mapping: Mapping[str, object], what: str) -> None:
+    """Raise unless *mapping* covers exactly the settings roster.
+
+    Import-time guard for the per-setting tables (:data:`_TYPES` here, the
+    display roster in :mod:`dataretrieval.configuration`). Not an ``assert``:
+    ``python -O`` strips those, and an unlisted setting would otherwise change
+    meaning by omission.
+    """
+    if set(mapping) == set(_ALL_SETTINGS):
+        return
     raise RuntimeError(
-        "every setting needs a type policy in _TYPES; "
-        f"missing={sorted(set(_ALL_SETTINGS) - set(_TYPES))} "
-        f"extra={sorted(set(_TYPES) - set(_ALL_SETTINGS))}"
+        f"every setting needs {what}; "
+        f"missing={sorted(set(_ALL_SETTINGS) - set(mapping))} "
+        f"extra={sorted(set(mapping) - set(_ALL_SETTINGS))}"
     )
+
+
+_require_full_coverage(_TYPES, "a type policy in _TYPES")
 
 
 def _coerce_typed(name: str, value: object, source: str, *, optional: str = "") -> str:
@@ -938,13 +952,18 @@ def _parse_base_url(raw: str, source: str) -> str:
     what a given service's paths look like, but it can refuse the shapes that
     are never a base URL and would fail far from here -- a bare hostname that
     ``httpx`` would reject, or a ``file://`` that is not a service at all.
+
+    A trailing slash is stripped: every consumer appends ``/<path>`` to the
+    value, so ``https://mirror.example/`` -- the natural spelling -- would
+    otherwise build ``https://mirror.example//ogcapi/v0``, a different route
+    to any strict router.
     """
     value = raw.strip()
     if not value.startswith(("http://", "https://")):
         raise ConfigurationError(
             f"{source} must be an absolute http:// or https:// URL (got {raw!r})."
         )
-    return value
+    return value.rstrip("/")
 
 
 def _parse_progress(raw: str, source: str, *, strict: bool) -> bool:

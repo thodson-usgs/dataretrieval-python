@@ -2,8 +2,8 @@
 
 This module is the single source of truth for the :class:`OgcDialect` type
 (per-API quirks the generic request builder needs) and OGC control validation.
-It depends only on the stdlib, so any OGC submodule can import it without
-creating cycles.
+It depends only on the stdlib and the validation leaf, so any OGC submodule
+can import it without creating cycles.
 
 It names no endpoint: which API an OGC call targets is the *adapter's*
 policy, supplied per call as ``base_url``. A default here would quietly
@@ -14,8 +14,9 @@ It must NOT import engine, shaping, or any collection adapter.
 
 from __future__ import annotations
 
-import numbers
 from dataclasses import dataclass, field
+
+from dataretrieval._validation import is_integral_count
 
 
 def _require_positive_int(
@@ -23,10 +24,13 @@ def _require_positive_int(
 ) -> None:
     """Validate a positive-integer OGC count control.
 
-    Any :class:`numbers.Integral` is accepted, including NumPy and pandas
-    integers, but ``bool`` is rejected despite being an ``Integral`` subtype.
+    What counts as an integer -- any :class:`numbers.Integral` including NumPy
+    and pandas integers, but never ``bool`` -- is the shared
+    :func:`~dataretrieval._validation.is_integral_count` rule, also read by the
+    configuration type policies; the positivity bound and the ``ValueError``
+    voice are this module's own.
     """
-    if not isinstance(value, numbers.Integral) or isinstance(value, bool) or value < 1:
+    if not is_integral_count(value) or value < 1:
         eg = f", e.g. {examples}" if examples else ""
         raise ValueError(f"{name} must be a positive integer{eg} (got {value!r}).")
 

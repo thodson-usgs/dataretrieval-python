@@ -16,7 +16,7 @@ from dataretrieval.ogc.requests import (
     _construct_api_requests as _construct_api_requests_explicit,
 )
 from dataretrieval.waterdata import get_continuous
-from dataretrieval.waterdata.utils import OGC_API_URL
+from dataretrieval.waterdata.endpoints import _DEFAULT_OGC_API_URL as OGC_API_URL
 
 # Bind the target API the way ``get_ogc_data`` does — explicitly — so the
 # direct construction tests below exercise the real builder.

@@ -11,11 +11,30 @@ variable name included, and the noun was never changed.
 This module owns the wording so a new check cannot invent its own. It is a
 leaf with no first-party imports: the vocabularies it validates against live
 with the adapters that define them, and only the rejection is shared.
+
+The other shared rule here is :func:`is_integral_count` -- what counts as an
+integer argument. It grew the same way the vocabulary check did: the
+bool-rejecting ``numbers.Integral`` test was spelled once in the OGC controls
+and again in the configuration type policies, so a tightening of one (say,
+NumPy handling) could not reach the other.
 """
 
 from __future__ import annotations
 
+import numbers
 from collections.abc import Collection
+
+
+def is_integral_count(value: object) -> bool:
+    """True when *value* is an integer in the counting sense.
+
+    Any :class:`numbers.Integral` qualifies -- a NumPy or pandas integer is a
+    legitimate count from Python -- but ``bool`` is rejected despite being an
+    ``Integral`` subtype: ``True`` is a flag that would silently read as ``1``.
+    Type shape only; bounds (and the error voice) stay with the caller, whose
+    policy they are.
+    """
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
 
 
 def _render(options: Collection[object]) -> str:

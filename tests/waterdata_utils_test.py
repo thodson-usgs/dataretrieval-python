@@ -39,10 +39,10 @@ from dataretrieval.ogc.shaping import (
 )
 from dataretrieval.ogc.shaping import _finalize_ogc as _ogc_finalize
 from dataretrieval.waterdata import get_stats_date_range, get_stats_por
+from dataretrieval.waterdata.endpoints import _DEFAULT_OGC_API_URL as OGC_API_URL
 from dataretrieval.waterdata.stats import _handle_nesting, get_data
 from dataretrieval.waterdata.utils import (
     _EXTRA_ID_COLS,
-    OGC_API_URL,
     WATERDATA_DIALECT,
     _flatten_queryables,
     _get_args,
@@ -1345,3 +1345,16 @@ def test_credential_shaped_queryables_are_rejected(name):
 )
 def test_real_queryables_still_pass_through(name):
     assert _flatten_queryables({"queryables": {name: "v"}}) == {name: "v"}
+
+
+def test_url_constants_warn_that_rebinding_no_longer_redirects():
+    """The documented constants are static defaults now: requests resolve
+    their destination through the ``endpoints`` accessors at call time, so a
+    rebind -- a once-working redirect/mock technique -- reaches no request.
+    Reading a constant (which includes ``monkeypatch.setattr``'s presence
+    check) says so, instead of leaving the discovery to a live query."""
+    for name in ("BASE_URL", "OGC_API_URL", "SAMPLES_URL"):
+        with pytest.warns(DeprecationWarning, match=name):
+            value = getattr(_utils_module, name)
+        assert isinstance(value, str)
+        assert value.startswith("https://")

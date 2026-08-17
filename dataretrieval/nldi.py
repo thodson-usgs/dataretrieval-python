@@ -40,7 +40,10 @@ except ImportError as err:
     raise ImportError("Install geopandas to use the NLDI module.") from err
 
 NLDI_API_BASE_URL = "https://api.water.usgs.gov/nldi/linked-data"
-_AVAILABLE_DATA_SOURCES = None
+#: Data-source catalogs already fetched, keyed by the base URL they came from.
+#: A ``configure`` block can redirect :func:`_api_base` mid-process, and a
+#: catalog cached from one host must not validate calls aimed at another.
+_AVAILABLE_DATA_SOURCES: dict[str, list[str]] = {}
 _CRS = "EPSG:4326"
 _VALID_NAVIGATION_MODES = ("UM", "DM", "UT", "DD")
 
@@ -552,12 +555,12 @@ def search(
 def _validate_data_source(data_source: str) -> None:
     # A helper function to validate user specified data source/feature source
 
-    global _AVAILABLE_DATA_SOURCES
-
-    # get the available data/feature sources - if not already cached
-    if _AVAILABLE_DATA_SOURCES is None:
-        url = f"{_api_base()}/"
-        available_data_sources = _query_nldi(url, {})
+    # get the available data/feature sources - if not already cached for the
+    # base URL this call resolves to
+    base = _api_base()
+    sources = _AVAILABLE_DATA_SOURCES.get(base)
+    if sources is None:
+        available_data_sources = _query_nldi(f"{base}/", {})
         if not isinstance(available_data_sources, list) or not all(
             isinstance(ds, dict) and "source" in ds for ds in available_data_sources
         ):
@@ -566,12 +569,13 @@ def _validate_data_source(data_source: str) -> None:
                 "expected a list of {'source': ..., ...} objects, got: "
                 f"{available_data_sources!r}"
             )
-        _AVAILABLE_DATA_SOURCES = [ds["source"] for ds in available_data_sources]
+        sources = [ds["source"] for ds in available_data_sources]
+        _AVAILABLE_DATA_SOURCES[base] = sources
 
-    if data_source not in _AVAILABLE_DATA_SOURCES:
+    if data_source not in sources:
         err_msg = (
             f"Invalid data source '{data_source}'."
-            f" Available data sources are: {_AVAILABLE_DATA_SOURCES}"
+            f" Available data sources are: {sources}"
         )
         raise ValueError(err_msg)
 

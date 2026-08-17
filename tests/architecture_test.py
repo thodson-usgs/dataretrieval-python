@@ -183,8 +183,9 @@ def test_config_is_a_standard_library_only_leaf() -> None:
 
     ``dataretrieval.configuration`` remains the public runtime interface and may
     depend on its private foundation, ``dataretrieval._configuration_core``.
-    The core may depend only on the package's dependency-free leaves,
-    ``dataretrieval._ambient`` and ``dataretrieval.exceptions``. Neither module
+    The core may depend only on the package's dependency-free leaves --
+    ``dataretrieval._ambient``, ``dataretrieval._validation`` (the shared
+    integer-argument rule), and ``dataretrieval.exceptions``. Neither module
     may reach adapters or runtime third-party packages. ``tomli`` remains the
     one third-party exception: it is the ``tomllib`` backport used on Python
     3.10.
@@ -196,6 +197,7 @@ def test_config_is_a_standard_library_only_leaf() -> None:
         },
         PACKAGE_ROOT / "_configuration_core.py": {
             "dataretrieval._ambient",
+            "dataretrieval._validation",
             "dataretrieval.exceptions",
         },
     }

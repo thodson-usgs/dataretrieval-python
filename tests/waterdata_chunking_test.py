@@ -84,7 +84,7 @@ from dataretrieval.transport.retry import (
     retry_async as _retry,
 )
 from dataretrieval.utils import HTTPX_DEFAULTS
-from dataretrieval.waterdata.utils import OGC_API_URL
+from dataretrieval.waterdata.endpoints import _DEFAULT_OGC_API_URL as OGC_API_URL
 
 # The joint-planner stress test drives the real request builder; bind the
 # target API the way ``get_ogc_data`` does — explicitly, via ``partial``.
