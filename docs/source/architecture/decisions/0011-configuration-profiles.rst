@@ -224,9 +224,10 @@ Satisfied. In ``tests/configuration_test.py``:
   than the only guard.
 
 ``tests/architecture_test.py::test_config_is_a_standard_library_only_leaf``
-asserts the module imports no adapter -- ``dataretrieval.exceptions`` is its
-only first-party import -- and ``lint-imports`` keeps ``configuration`` below
-``credentials``.
+asserts the two-module subsystem imports no adapter -- the private core's only
+first-party dependencies are the dependency-free ``dataretrieval._ambient``,
+``dataretrieval._validation``, and ``dataretrieval.exceptions`` leaves -- and
+``lint-imports`` keeps ``configuration`` below ``credentials``.
 
 Notes
 -----

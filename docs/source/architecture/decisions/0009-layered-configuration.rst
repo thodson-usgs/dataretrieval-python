@@ -123,10 +123,12 @@ Supporting decisions:
   splittable query in every process that reads the file. A
   ``[profiles.<name>]`` table is opt-in per run, which is the shape this
   setting wants; the top-level form still works but says so.
-- **``dataretrieval.configuration`` is a lightweight leaf.** It uses only the standard
-  library, the ``tomli`` backport on Python 3.10, and
-  ``dataretrieval.exceptions`` -- itself a dependency-free leaf, so this adds
-  no weight and cannot cycle. It is read by ``utils``
+- **``dataretrieval.configuration`` is a lightweight leaf.** Its two-module
+  subsystem uses only the standard library and the ``tomli`` backport on
+  Python 3.10. The private core depends only on the dependency-free
+  ``dataretrieval._ambient``, ``dataretrieval._validation``, and
+  ``dataretrieval.exceptions`` leaves, so this adds no weight and cannot cycle.
+  It is read by ``utils``
   (headers), ``ogc.chunking``, ``ogc.retry``, and ``ogc.progress``, so under ADR
   0003 it must import none of them. The public callable is named ``configure``
   rather than ``config`` so it does not shadow the module. It is a scoped
@@ -186,9 +188,10 @@ Compliance
 ----------
 
 ``tests/architecture_test.py::test_config_is_a_standard_library_only_leaf``
-asserts the module imports nothing from ``dataretrieval`` other than the
-``exceptions`` taxonomy leaf, and no third-party package other than the
-``tomli`` backport.
+asserts the public interface may import its private core and the ``exceptions``
+taxonomy leaf, while the core may import only the dependency-free ``_ambient``,
+``_validation``, and ``exceptions`` leaves. Neither module may import a
+third-party package other than the ``tomli`` backport.
 ``tests/configuration_test.py`` covers the precedence chain, per-setting merging,
 thread and asyncio isolation, host scoping for file-sourced keys, redaction in
 ``show_configuration``, and rejection of credential parameters on public getters.
