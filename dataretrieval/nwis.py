@@ -148,15 +148,15 @@ def _parse_json_or_raise(response: httpx.Response) -> pd.DataFrame:
         raise
 
 
-def _localize_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+def _localized_datetime_index(index: pd.Index) -> pd.Index:
     """Localize a naive datetime index (or multi-index level) to UTC."""
-    if hasattr(df.index, "levels"):
+    if hasattr(index, "levels"):
         # Multi-index: localize the datetime level (level 1)
-        if hasattr(df.index.levels[1], "tzinfo") and df.index.levels[1].tzinfo is None:
-            df = df.tz_localize("UTC", level=1)
-    elif hasattr(df.index, "tzinfo") and df.index.tzinfo is None:
-        df = df.tz_localize("UTC")
-    return df
+        if hasattr(index.levels[1], "tzinfo") and index.levels[1].tzinfo is None:
+            return index.set_levels(index.levels[1].tz_localize("UTC"), level=1)
+    elif hasattr(index, "tzinfo") and index.tzinfo is None:
+        return index.tz_localize("UTC")
+    return index
 
 
 def format_response(
@@ -198,11 +198,19 @@ def format_response(
         return df
 
     if len(df["site_no"].unique()) > 1 and mi:
-        df.set_index(["site_no", "datetime"], inplace=True)
+        keys = ["site_no", "datetime"]
     else:
-        df.set_index(["datetime"], inplace=True)
+        keys = ["datetime"]
 
-    df = _localize_datetime_index(df)
+    # Index our own frame, never the caller's. The shallow copy shares the
+    # columns; ``set_index`` without ``inplace`` duplicates them, because
+    # pandas deep-copies the frame whenever copy-on-write is off.
+    df = df.copy(deep=False)
+    df.set_index(keys, inplace=True)  # noqa: PD002 # our copy, not the caller's
+
+    # Retag the index alone; ``DataFrame.tz_localize`` relabels the axis by
+    # duplicating every column whenever copy-on-write is off.
+    df.index = _localized_datetime_index(df.index)
     return df.sort_index()
 
 
@@ -238,6 +246,8 @@ def preformat_peaks_response(df: pd.DataFrame) -> pd.DataFrame:
         # still raise.
         return df
 
+    # Derive the column on our own frame, never the caller's.
+    df = df.copy(deep=False)
     df["datetime"] = pd.to_datetime(df["peak_dt"], errors="coerce")
     return df
 
@@ -897,6 +907,44 @@ def what_sites(
     return df, NWIS_Metadata(response, **kwargs)
 
 
+# Each ignored ``get_record`` parameter maps to its declared default and
+# replacement getter guidance, not restrictions on the replacement getter.
+_DEFUNCT_RECORD_OPTIONS: dict[str, tuple[object, str]] = {
+    "wide_format": (True, "`waterdata.get_samples()`"),
+    "datetime_index": (
+        True,
+        "`waterdata.get_continuous()` or `waterdata.get_daily()`",
+    ),
+    "state": (None, "`nwdc.get_wateruse(state=...)`"),
+}
+
+
+def _warn_defunct_record_options(**given: object) -> None:
+    """Warn when an ignored ``get_record`` parameter differs from its default.
+
+    ``given`` must contain only names from ``_DEFUNCT_RECORD_OPTIONS``.
+    Values equal to the declared defaults do not produce parameter warnings,
+    whether passed explicitly or omitted by the caller of ``get_record``.
+    Replacement names in the table identify getters for retrieving the data;
+    they do not mean those getters accept the ignored parameters.
+    """
+    for name, value in given.items():
+        unset, replacement = _DEFUNCT_RECORD_OPTIONS[name]
+        if value != unset:
+            warn_deprecated(
+                f"`nwis.get_record`'s `{name}` argument",
+                replacement=replacement,
+                removal=_NWIS_REMOVAL_DATE,
+                detail=(
+                    "It is ignored, and has been since the service that read "
+                    "it was retired."
+                ),
+                # _warn_defunct_record_options -> get_record -> @_deprecated
+                # wrapper -> the caller's own line.
+                stacklevel=4,
+            )
+
+
 @_deprecated
 def get_record(
     sites: list[str] | str | None = None,
@@ -929,12 +977,25 @@ def get_record(
         If False, return a dataframe with a single-level index (datetime).
         Default is True.
     wide_format : bool, optional
-        If True, return data in wide format, with multiple samples per row and
-        one row per time. Default is True.
+        (defunct) Previously shaped output from the retired 'qwdata' service.
+        ``get_record`` ignores this parameter; passing ``False`` emits a
+        ``DeprecationWarning``.
+        To retrieve sample data, use ``waterdata.get_samples``,
+        which returns one row per result and has no ``wide_format`` parameter.
     datetime_index : bool, optional
-        If True, create a datetime index. Default is True.
+        (defunct) Previously shaped output from the retired 'qwdata' and
+        'gwlevels' services.
+        ``get_record`` ignores this parameter; passing ``False`` emits a
+        ``DeprecationWarning``.
+        To retrieve time-series data, use ``waterdata.get_continuous`` or
+        ``waterdata.get_daily``, which return ``time`` as a column and have
+        no ``datetime_index`` parameter.
     state: string, optional, default is None
-        State full name, abbreviation, or id.
+        (defunct) Previously selected sites for the retired 'water_use' service.
+        ``get_record`` ignores this parameter; passing a value other than
+        ``None`` emits a ``DeprecationWarning``.
+        To retrieve water-use data by state, use ``nwdc.get_wateruse(state=...)``.
+        Its ``state`` parameter is supported and filters the query.
     service: string, default is 'iv'
         - 'iv' : instantaneous data
         - 'dv' : daily mean data
@@ -1011,6 +1072,10 @@ def get_record(
             "New work should use the dataretrieval.waterdata getters instead; "
             "NWIS is deprecated."
         ),
+    )
+
+    _warn_defunct_record_options(
+        wide_format=wide_format, datetime_index=datetime_index, state=state
     )
 
     if service == "iv":
@@ -1099,15 +1164,13 @@ def _parse_parameter_record(
     record_df["qualifiers"] = (
         record_df["qualifiers"].astype(str).str.strip("[]").str.replace("'", "")
     )
-    record_df.rename(
+    return record_df.rename(
         columns={
             "value": col_name,
             "dateTime": "datetime",
             "qualifiers": col_name + "_cd",
-        },
-        inplace=True,
+        }
     )
-    return record_df
 
 
 def _parse_site_block(site_block: list[dict[str, Any]]) -> pd.DataFrame:

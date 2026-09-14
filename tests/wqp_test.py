@@ -25,7 +25,7 @@ from dataretrieval.wqp import (
 
 
 def mock_request(httpx_mock, request_url, file_path):
-    with open(file_path) as text:
+    with open(file_path, encoding="utf-8") as text:
         httpx_mock.add_response(
             method="GET",
             url=request_url,
@@ -149,7 +149,7 @@ def test_what_activities_accepts_documented_legacy_profiles(httpx_mock, profile)
 
 def test_wqx3_get_results_repeats_list_query_parameters(httpx_mock):
     """WQX3 array filters use repeated keys rather than semicolons."""
-    with open("tests/data/wqp3_results.txt") as text:
+    with open("tests/data/wqp3_results.txt", encoding="utf-8") as text:
         httpx_mock.add_response(method="GET", text=text.read())
 
     get_results(
@@ -179,7 +179,7 @@ def test_wqx3_get_results_repeats_list_query_parameters(httpx_mock):
 )
 def test_wqx3_get_results_repeats_iterable_query_parameters(httpx_mock, values_factory):
     """WQX3 materializes non-list iterables before httpx serialization."""
-    with open("tests/data/wqp3_results.txt") as text:
+    with open("tests/data/wqp3_results.txt", encoding="utf-8") as text:
         httpx_mock.add_response(method="GET", text=text.read())
 
     _df, md = get_results(
@@ -196,7 +196,7 @@ def test_wqx3_get_results_repeats_iterable_query_parameters(httpx_mock, values_f
 
 def test_legacy_get_results_preserves_generator_values_in_metadata(httpx_mock):
     """Legacy serialization must not leave an exhausted metadata iterator."""
-    with open("tests/data/wqp_results.txt") as text:
+    with open("tests/data/wqp_results.txt", encoding="utf-8") as text:
         httpx_mock.add_response(method="GET", text=text.read())
 
     _df, md = get_results(
@@ -212,7 +212,7 @@ def test_legacy_get_results_preserves_generator_values_in_metadata(httpx_mock):
 
 def test_wqx3_what_sites_repeats_list_query_parameters(httpx_mock):
     """The WQX3 serializer also applies to metadata search endpoints."""
-    with open("tests/data/wqp_sites.txt") as text:
+    with open("tests/data/wqp_sites.txt", encoding="utf-8") as text:
         httpx_mock.add_response(method="GET", text=text.read())
 
     what_sites(legacy=False, siteType=["Stream", "Well"])
@@ -347,7 +347,7 @@ def test_what_query(httpx_mock, func, service, fixture, profile_column):
     assert profile_column in df.columns
     # Only get_results post-processes: the shared query path must return each
     # what_* response exactly as parsed, with no DateTime columns and no sort.
-    with open(f"tests/data/{fixture}") as text:
+    with open(f"tests/data/{fixture}", encoding="utf-8") as text:
         assert_frame_equal(df, read_code_csv(text.read()))
     _assert_wqp_metadata(md, request_url)
 
