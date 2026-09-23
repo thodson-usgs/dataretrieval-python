@@ -257,3 +257,10 @@ Notes
 - The setting-group clause was added after the original decision, consolidating
   under ADR 0000 a rule the configuration core was stating in prose. It does
   not change behavior.
+- ``api_version`` was added on 2026-09-22 as a second adapter-only setting,
+  when the Water Data OGC collections moved to v1. Unlike ``base_url``, the
+  file accepts it: the code-only rule above exists because a base URL can
+  redirect requests to another host, and a version cannot. The file's refusal
+  is therefore keyed on a separate ``BLOCK_ONLY_SETTINGS`` list, while the
+  environment still refuses every adapter-only setting, because a variable is
+  package-wide.
