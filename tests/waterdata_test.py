@@ -6,7 +6,7 @@ import re
 import warnings
 from pathlib import Path
 from unittest import mock
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote_plus, urlsplit
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,7 @@ import pytest
 from pandas import DataFrame
 
 import dataretrieval
-from dataretrieval import configuration
+from dataretrieval import configuration, waterdata
 from dataretrieval.ogc.requests import (
     _check_monitoring_location_id,
     _normalize_str_iterable,
@@ -1242,6 +1242,86 @@ def test_v0_routing_does_not_write_on_the_callers_configuration(httpx_mock):
     legacy, other = (str(r.url) for r in httpx_mock.get_requests())
     assert legacy.startswith(f"{_V0_OGC_BASE}/collections/time-series-metadata")
     assert other.startswith(f"{_OGC_BASE}/collections/daily")
+
+
+def _filters_on_the_wire(httpx_mock, collection):
+    """The URL and body of the ``/items`` request, percent-decoded, as one string.
+
+    Two of these collections POST a CQL2 body instead of a GET query string, so
+    a filter can be in either.
+    """
+    for request in httpx_mock.get_requests():
+        if f"/collections/{collection}/items" in str(request.url):
+            body = request.content.decode() if request.content else ""
+            return unquote_plus(f"{request.url} {body}")
+    raise AssertionError(f"no /items request for {collection}")
+
+
+#: Returned columns that could be passed only through ``**queryables`` before
+#: they became named parameters, by getter and collection, with a test value.
+_NEWLY_NAMED = {
+    ("get_channel", "channel-measurements"): {
+        "channel_location_direction": "left bank",
+    },
+    ("get_field_measurements", "field-measurements"): {
+        "control_condition": "Clear",
+        "day": 5,
+        "field_measurements_series_id": "abc123",
+        "measurement_rated": "Good",
+        "month": 3,
+        "reading_type": "Discharge",
+        "time_of_day": "17:30:00",
+        "year": 2020,
+    },
+    ("get_peaks", "peaks"): {
+        "qualifier": "Bd",
+        "time_of_day": "17:30:00",
+        "value": "847000",
+    },
+    ("get_combined_metadata", "combined-metadata"): {
+        "data_gap_interval": "P1D",
+        "reading_type": "Discharge",
+    },
+    ("get_monitoring_locations", "monitoring-locations"): {
+        "revision_created": "2024-01-01",
+        "revision_modified": "2024-01-01",
+        "revision_note": "corrected",
+    },
+    ("get_time_series_metadata", "time-series-metadata"): {
+        "data_gap_interval": "P1D",
+        "parameter_description": "Discharge",
+    },
+    ("get_field_measurements_metadata", "field-measurements-metadata"): {
+        "reading_type": "Discharge",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("getter_name", "collection", "parameter", "value"),
+    [
+        pytest.param(getter, collection, parameter, value, id=f"{getter}-{parameter}")
+        for (getter, collection), params in _NEWLY_NAMED.items()
+        for parameter, value in params.items()
+    ],
+)
+def test_newly_named_columns_reach_the_request(
+    httpx_mock, getter_name, collection, parameter, value
+):
+    """A newly named parameter is sent to the service.
+
+    A name moved from ``**queryables`` into the signature could be accepted but
+    not forwarded, which returns unfiltered results instead of failing.
+    """
+    _mock_items(httpx_mock, collection)
+
+    getattr(waterdata, getter_name)(
+        monitoring_location_id="USGS-05427718", **{parameter: value}
+    )
+
+    sent = _filters_on_the_wire(httpx_mock, collection)
+    assert parameter in sent, f"{parameter} was not sent: {sent}"
+    assert str(value) in sent, f"{parameter}'s value was not sent: {sent}"
 
 
 def test_get_combined_metadata(httpx_mock):
