@@ -257,11 +257,14 @@ value. Where the distinction matters — reporting what a call will use
 error shapes, and response quirks. Adapters may use shared code; shared code
 may not reference adapters.
 
-**Dialect** — The per-API quirks the shared OGC code needs in order to
-serve two services from one code path: which collections must be POSTed as
-CQL2, which render dates date-only, which columns to coerce and sort by. An
-adapter supplies one and the shared code reads it, which is how protocol code
-stays free of service names.
+**Dialect** — Where a service departs from the OGC standard, as data the
+shared OGC code reads. The shared code implements the standard; each
+extension, restriction, or renaming a service makes is one dialect field
+whose default is the standard (ADR 0014): which parameters carry dates and
+how an open start is spelled, which collections must be POSTed as CQL2, which
+columns to coerce and sort by. An adapter supplies one, which is how protocol
+code stays free of service names. Fields are grouped by the part of the shared
+code that reads them; `DateDialect` is the date group.
 
 **Single-shot adapter** — An adapter whose query is always exactly one request:
 WQP, NLDI, StreamStats, and deprecated NWIS. Nothing divides and nothing
@@ -312,9 +315,9 @@ entry (ADR 0013).
   OGC internals, the Water Data wrappers, and all eleven typed getters now say
   `collection`; `waterdata.get_cql` takes `collection`; and the type alias is
   `WATERDATA_COLLECTIONS`. `service=` on `get_cql` and the `WATERDATA_SERVICES`
-  alias remain — a deprecated keyword and a permanent alias respectively. Two
-  `OgcDialect` fields also still say it: `cql2_services` and
-  `date_only_services` are keyed by collection.
+  alias remain — a deprecated keyword and a permanent alias respectively. The
+  `OgcDialect` fields that said it are now `cql2_collections` and
+  `DateDialect.date_only_collections`.
 
   `service` still means the external system in `transport` and `progress`,
   where it labels a progress line. That usage is correct.

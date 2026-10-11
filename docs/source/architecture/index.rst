@@ -108,8 +108,9 @@ Shared components
     Protocol subsystem for Water Data and NGWMN. A facade (``__init__.py``)
     exposes the service-adapter seam: ``OgcDialect``, ``prepare_request_args``,
     and ``get_ogc_data`` (whose ``cql_body`` parameter covers verbatim-CQL2
-    queries).
-    Internally, ``policy`` defines the dialect type, control validation, and
+    queries). The subsystem implements the OGC standard; where a service
+    departs from it, the adapter's dialect says so (ADR 0014).
+    Internally, ``policy`` defines the dialect types, control validation, and
     endpoint constants; ``requests`` owns argument normalization and HTTP
     request construction, taking the target ``base_url`` and ``dialect`` as
     explicit parameters; ``schema`` executes queryables/schema requests;
