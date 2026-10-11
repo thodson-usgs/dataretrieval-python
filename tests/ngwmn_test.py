@@ -474,6 +474,14 @@ def test_get_water_level_sends_an_open_start_empty(httpx_mock, datetime):
     assert qs["datetime"] == ["/2016-01-01T00:00:00Z"]
 
 
+def test_get_water_level_rejects_a_duration_before_any_request(httpx_mock):
+    """NGWMN answers ``datetime=P7D`` with HTTP 400, and its dialect keeps the
+    standard default of no durations, so the call fails locally instead."""
+    with pytest.raises(ValueError, match="^datetime does not accept an ISO 8601"):
+        ngwmn.get_water_level(monitoring_location_id=_SITE, datetime="P7D")
+    assert httpx_mock.get_requests() == []
+
+
 def test_get_lithology(httpx_mock):
     _mock(httpx_mock, "lithologyObs", _LITHOLOGY)
 

@@ -15,6 +15,7 @@ from pandas import DataFrame
 
 import dataretrieval
 from dataretrieval import configuration
+from dataretrieval.ogc.dates import _format_date_args
 from dataretrieval.ogc.requests import (
     _check_monitoring_location_id,
     _normalize_str_iterable,
@@ -604,10 +605,16 @@ def test_get_args_materializes_numpy_and_series_numeric_params():
     assert "bbox=-92.8%2C44.2%2C-88.9%2C46.0" in str(req.url)
 
 
+def _build_with_dates(collection, **kwargs):
+    """Format date arguments the way ``get_ogc_data`` does, then build."""
+    args = _format_date_args(kwargs, collection, WATERDATA_DIALECT.dates)
+    return _construct_api_requests(collection, **args)
+
+
 def test_construct_api_requests_keeps_dotdot_for_an_open_start():
     """The Water Data API answers an empty start (``time=/2024-01-31``) with
     HTTP 400, so its dialect keeps the default ``..``."""
-    req = _construct_api_requests(
+    req = _build_with_dates(
         "daily", monitoring_location_id="USGS-05427718", time=[None, "2024-01-31"]
     )
     assert "time=..%2F2024-01-31" in str(req.url)
@@ -618,13 +625,13 @@ def test_construct_api_requests_two_element_date_list_becomes_interval():
     interval (joined with '/'), NOT as two discrete dates. The OGC `datetime`
     parameter does not support "these N specific dates" — that would require
     a CQL filter. Verifying so this contract is pinned."""
-    req = _construct_api_requests(
+    req = _build_with_dates(
         "daily",
         monitoring_location_id="USGS-05427718",
         time=["2024-01-01", "2024-01-31"],
     )
     assert req.method == "GET"
-    # `/` URL-encodes to %2F. Confirms _format_api_dates ran before the join.
+    # `/` URL-encodes to %2F.
     assert "time=2024-01-01%2F2024-01-31" in str(req.url)
 
 
@@ -632,7 +639,7 @@ def test_construct_api_requests_accepts_timestamp_bounds():
     """A ``pandas.Timestamp`` bound, as in ``time=[df.index.min(), None]``,
     builds the same request as its string spelling instead of raising
     ``AttributeError``."""
-    req = _construct_api_requests(
+    req = _build_with_dates(
         "daily",
         monitoring_location_id="USGS-05427718",
         time=[pd.Timestamp("2024-01-01", tz="UTC"), None],

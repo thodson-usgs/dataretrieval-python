@@ -25,7 +25,7 @@ import pandas as pd
 from dataretrieval._deprecation import warn_deprecated
 from dataretrieval.codes.states import apply_state
 from dataretrieval.credentials import refuse_credential_keywords
-from dataretrieval.ogc import OgcDialect, prepare_request_args
+from dataretrieval.ogc import DateDialect, OgcDialect, prepare_request_args
 from dataretrieval.ogc import get_ogc_data as _facade_get_ogc_data
 
 # Default endpoint constants remain at their documented compatibility paths.
@@ -73,18 +73,39 @@ _EXTRA_ID_COLS = frozenset(
     - {"monitoring_location_id", "time_series_id"}
 )
 
-# The Water Data API dialect: ``monitoring-locations`` and
-# ``combined-metadata`` don't interpret comma-separated GET params as multiple
-# values (they return empty results, so multi-value filters must POST CQL2 JSON),
-# ``daily`` renders its time arguments date-only (``YYYY-MM-DD``), and the
-# ``time_cols``/``numerical_cols``/``sort_cols`` are the Water-Data column
-# vocabulary used to coerce datetime/numeric columns and to sort results.
+# Where the Water Data API departs from OGC API Features (ADR 0014; behavior
+# observed 2026-10-11):
+#
+# - Dates: it filters on several temporal properties besides ``datetime``;
+#   ``daily`` takes dates without a time, except ``last_modified``, which is a
+#   timestamp everywhere; it accepts a lone duration (``time=P7D``); and it
+#   answers an empty open start (``time=/2024-01-01``) with HTTP 400, so the
+#   standard ``..`` stays.
+# - ``monitoring-locations`` and ``combined-metadata`` return no rows for a
+#   comma-separated multi-value GET, so multi-value filters POST CQL2 JSON.
+# - ``time_cols``/``numerical_cols``/``sort_cols`` are its column vocabulary,
+#   used to coerce datetime/numeric columns and to sort results.
 # ``construction_date`` is deliberately not a time column: the service sends it
 # as a string at day, month, or year precision (``19950812``, ``199508``,
 # ``2005``), and no one datetime parse keeps all three, so it stays as sent.
 WATERDATA_DIALECT = OgcDialect(
-    cql2_services=frozenset({"combined-metadata", "monitoring-locations"}),
-    date_only_services=frozenset({"daily"}),
+    cql2_collections=frozenset({"combined-metadata", "monitoring-locations"}),
+    dates=DateDialect(
+        params=frozenset(
+            {
+                "datetime",
+                "time",
+                "begin",
+                "begin_utc",
+                "end",
+                "end_utc",
+                "last_modified",
+            }
+        ),
+        date_only_collections=frozenset({"daily"}),
+        always_datetime=frozenset({"last_modified"}),
+        durations=True,
+    ),
     time_cols=frozenset(
         {
             "begin",
@@ -110,7 +131,7 @@ WATERDATA_DIALECT = OgcDialect(
 )
 
 # The Water-Data-specific extras in addition to the engine's own no-normalize set
-# (which already covers the date-range params and ``bbox``). Scalar non-string
+# (which already covers ``bbox`` and the dialect's date parameters). Scalar non-string
 # parameters are caught by runtime type, so only iterables with special handling
 # need to be named here:
 #   - ``boundingBox`` is ``list[float]``, sometimes ``numpy.ndarray``
@@ -181,7 +202,10 @@ def _get_args(
     """
     _flatten_queryables(local_vars)
     args = prepare_request_args(
-        local_vars, exclude, extra_no_normalize=_NO_NORMALIZE_PARAMS
+        local_vars,
+        exclude,
+        dialect=WATERDATA_DIALECT,
+        extra_no_normalize=_NO_NORMALIZE_PARAMS,
     )
     for name in _JSON_ARRAY_PARAMS & args.keys():
         # An empty list is dropped from the request downstream, as for any filter.

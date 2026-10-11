@@ -16,7 +16,6 @@ from typing import Any
 
 import httpx
 
-from dataretrieval.ogc.dates import _DATE_RANGE_PARAMS, _format_api_dates
 from dataretrieval.ogc.policy import DEFAULT_DIALECT, OgcDialect
 from dataretrieval.transport.http import default_headers as _default_headers
 
@@ -172,22 +171,14 @@ def _construct_api_requests(
     ``base_url`` is required: this package is API-neutral and names no API of
     its own, so the adapter naming the collection also names the API it targets.
     ``dialect`` defaults to a plain OGC API with no per-collection quirks.
+    Date parameters arrive already in their wire form: ``get_ogc_data``
+    formats them once, before planning (ADR 0014).
     """
     service_url = _items_url(collection, base_url)
     if dialect is None:
         dialect = DEFAULT_DIALECT
-    for key in _DATE_RANGE_PARAMS:
-        if key in kwargs:
-            kwargs[key] = _format_api_dates(
-                kwargs[key],
-                name=key,
-                date=(
-                    collection in dialect.date_only_services and key != "last_modified"
-                ),
-                open_start=dialect.open_start,
-            )
     params, post_params = _partition_request_params(
-        kwargs, use_cql2=collection in dialect.cql2_services
+        kwargs, use_cql2=collection in dialect.cql2_collections
     )
 
     _ogc_query_params(
@@ -243,17 +234,17 @@ def _construct_cql_request(
 # Argument normalization helpers
 # ---------------------------------------------------------------------------
 
-# Iterable params that ``_get_args`` must not pass through
-# ``_normalize_str_iterable`` (date-range params may contain ``pd.NaT``/None or
-# interval strings; ``bbox`` is ``list[float]``). These apply to every OGC caller;
-# an adapter with extra numeric params names only its extras via
+# Iterable params that ``prepare_request_args`` must not pass through
+# ``_normalize_str_iterable``: ``bbox`` is ``list[float]``. The dialect's date
+# parameters, which may hold ``None`` or dates, are added per call; an adapter
+# with extra numeric params names only its extras via
 # ``prepare_request_args(..., extra_no_normalize=...)``.
-_NO_NORMALIZE_PARAMS = _DATE_RANGE_PARAMS | {"bbox"}
+_NO_NORMALIZE_PARAMS = frozenset({"bbox"})
 
 
 def _normalize_str_iterable(
     value: str | Iterable[str] | None,
-    param_name: str = "value",
+    param_name: str,
 ) -> str | list[str] | None:
     """Validate that ``value`` is None, a string, or an iterable of strings."""
     if value is None:
@@ -278,7 +269,7 @@ def _normalize_str_iterable(
 
 def _as_str_list(
     value: str | Iterable[str] | None,
-    param_name: str = "value",
+    param_name: str,
 ) -> list[str] | None:
     """Normalize ``value`` to ``list[str]`` (``None`` passes through)."""
     normalized = _normalize_str_iterable(value, param_name)
@@ -335,6 +326,7 @@ def prepare_request_args(
     local_vars: dict[str, Any],
     exclude: set[str] | None = None,
     *,
+    dialect: OgcDialect = DEFAULT_DIALECT,
     extra_no_normalize: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, Any]:
     """Build OGC request kwargs from a getter's ``locals()``.
@@ -343,12 +335,15 @@ def prepare_request_args(
     are omitted. Identifiers and properties are validated; other iterables are
     normalized unless exempted.
 
-    ``extra_no_normalize`` *adds* to the engine's own
-    :data:`_NO_NORMALIZE_PARAMS` rather than replacing it, so an adapter names
-    only the params it owns and cannot drop the date-range exemptions
-    by omitting them.
+    The *dialect*'s date parameters are left as given, for ``get_ogc_data``
+    to format with the same dialect. ``extra_no_normalize`` *adds* to those and
+    :data:`_NO_NORMALIZE_PARAMS` rather than replacing them, so an adapter names
+    only the params it owns and cannot drop the date exemptions by omitting
+    them.
     """
-    no_normalize = _NO_NORMALIZE_PARAMS | frozenset(extra_no_normalize)
+    no_normalize = (
+        _NO_NORMALIZE_PARAMS | dialect.dates.params | frozenset(extra_no_normalize)
+    )
     to_exclude = {"collection", "service", "output_id"}
     if exclude:
         to_exclude.update(exclude)

@@ -34,7 +34,13 @@ from dataretrieval.configuration import (
     _Retrying,
 )
 from dataretrieval.credentials import WATERDATA_BASE_URL
-from dataretrieval.ogc import DateInput, OgcDialect, get_ogc_data, prepare_request_args
+from dataretrieval.ogc import (
+    DateDialect,
+    DateInput,
+    OgcDialect,
+    get_ogc_data,
+    prepare_request_args,
+)
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
@@ -80,12 +86,13 @@ _STATE_QUERYABLE = {
 # (there is no service-specific id name as there is for the main collections).
 _NGWMN_OUTPUT_ID = "id"
 
-# NGWMN has no CQL2-only or date-only collections, but its result columns need
-# their own coercion and sort vocabulary: water-level observations are
-# timestamped by ``sample_time`` (not the Water Data ``time``) and report
-# depths/levels in feet. Its firewall answers ``datetime=../2016-01-01`` with
-# HTTP 403, so an open start is sent empty (``/2016-01-01``), which it reads as
-# open.
+# Where NGWMN departs from OGC API Features (ADR 0014; behavior observed
+# 2026-10-11). Its only date parameter is the standard ``datetime``, and it
+# rejects a lone duration (HTTP 400), as the standard default does. Its
+# firewall answers ``datetime=../2016-01-01`` with HTTP 403, so an open start is
+# sent empty (``/2016-01-01``), which NGWMN reads as open. Its result columns
+# need their own coercion and sort vocabulary: water-level observations are
+# timestamped by ``sample_time`` and report depths/levels in feet.
 NGWMN_DIALECT = OgcDialect(
     time_cols=frozenset({"sample_time"}),
     numerical_cols=frozenset(
@@ -96,7 +103,7 @@ NGWMN_DIALECT = OgcDialect(
         }
     ),
     sort_cols=("sample_time", "monitoring_location_id"),
-    open_start="",
+    dates=DateDialect(open_start=""),
 )
 
 
@@ -109,7 +116,7 @@ def _get(service: str, local_vars: dict[str, Any]) -> tuple[pd.DataFrame, BaseMe
     queryable = _STATE_QUERYABLE.get(service)
     if queryable is not None:
         apply_state(local_vars, to=queryable["to"], into=queryable["into"])
-    args = prepare_request_args(local_vars)
+    args = prepare_request_args(local_vars, dialect=NGWMN_DIALECT)
     return get_ogc_data(
         args,
         service,

@@ -21,7 +21,7 @@ from dataretrieval.exceptions import (
     TransientError,
 )
 from dataretrieval.interruptions import ServiceInterrupted
-from dataretrieval.ogc.dates import _format_api_dates
+from dataretrieval.ogc.dates import _format_api_dates, _format_date_args
 from dataretrieval.ogc.engine import (
     _next_req_url,
     _walk_pages,
@@ -31,7 +31,7 @@ from dataretrieval.ogc.errors import (
     _parse_retry_after,
     _raise_for_non_200,
 )
-from dataretrieval.ogc.policy import OgcDialect
+from dataretrieval.ogc.policy import DateDialect, OgcDialect
 from dataretrieval.ogc.schema import _check_ogc_requests
 from dataretrieval.ogc.shaping import (
     _arrange_cols,
@@ -928,8 +928,6 @@ def test_type_cols_warning_is_singular_for_one_value():
             "2018-02-12T23:20:50Z/2018-03-18T12:31:12Z",
         ),
         ("2018-02-12T00:00:00Z/..", False, "2018-02-12T00:00:00Z/.."),
-        ("P7D", False, "P7D"),
-        ("PT36H", False, "PT36H"),
         ("2024-01-01", True, "2024-01-01"),
         (["2024-01-01", "2024-02-01"], True, "2024-01-01/2024-02-01"),
         ("2024-01-01 00:00:00", True, "2024-01-01"),
@@ -949,8 +947,6 @@ def test_type_cols_warning_is_singular_for_one_value():
         "offset_to_utc",
         "iso8601_pair_to_interval",
         "utc_interval_string",
-        "passthrough_duration",
-        "time_only_duration",
         "date_only",
         "date_only_pair",
         "space_separated",
@@ -964,9 +960,42 @@ def test_type_cols_warning_is_singular_for_one_value():
 def test_format_api_dates(value, date, expected):
     """``_format_api_dates`` normalizes ISO 8601 datetimes to UTC (dropping
     fractional seconds, converting offsets), joins a pair into an interval,
-    passes durations through unchanged, and renders a None endpoint as
-    ``..``."""
+    and renders a None endpoint as ``..``."""
     assert _format_api_dates(value, date=date) == expected
+
+
+def test_format_date_args_reads_every_choice_from_the_dialect():
+    """Which parameters carry dates, which collections take dates only, and
+    which parameters keep their time there all come from the dialect; others
+    pass through untouched, and the caller's mapping is not modified."""
+    dialect = DateDialect(
+        params=frozenset({"datetime", "observed"}),
+        date_only_collections=frozenset({"days"}),
+        always_datetime=frozenset({"datetime"}),
+    )
+    args = {
+        "observed": ["2024-01-01T10:00:00Z", None],
+        "datetime": "2024-01-01T10:00:00Z",
+        "other": ["a", "b"],
+    }
+    out = _format_date_args(args, "days", dialect)
+    assert out == {
+        "observed": "2024-01-01/..",
+        "datetime": "2024-01-01T10:00:00Z",
+        "other": ["a", "b"],
+    }
+    assert args["observed"] == ["2024-01-01T10:00:00Z", None]
+    elsewhere = _format_date_args(args, "hours", dialect)
+    assert elsewhere["observed"] == "2024-01-01T10:00:00Z/.."
+
+
+@pytest.mark.parametrize("value", ["P7D", "PT36H", "p1m"])
+def test_format_api_dates_passes_a_duration_only_where_the_dialect_allows(value):
+    """The standard defines no durations, so the default dialect rejects one
+    before any request; a dialect with ``durations=True`` sends it as given."""
+    assert _format_api_dates(value, dialect=DateDialect(durations=True)) == value
+    with pytest.raises(ValueError, match="^time does not accept an ISO 8601 duration"):
+        _format_api_dates(value, name="time")
 
 
 def test_format_api_dates_passes_none_through():
@@ -1054,16 +1083,18 @@ def test_format_api_dates_spells_an_open_start_as_the_api_does(value):
     caller's ``open_start`` otherwise: NGWMN and STAC reject ``"../"`` (HTTP
     403), and the Water Data API rejects an empty start (HTTP 400)."""
     assert _format_api_dates(value) == "../2024-01-01T00:00:00Z"
-    assert _format_api_dates(value, open_start="") == "/2024-01-01T00:00:00Z"
+    empty = DateDialect(open_start="")
+    assert _format_api_dates(value, dialect=empty) == "/2024-01-01T00:00:00Z"
 
 
 def test_format_api_dates_open_start_leaves_an_open_end_and_no_filter_alone():
     """``open_start`` changes only the start: an open end is ``..`` on every API,
     and a range with both ends open is still no filter."""
-    open_end = _format_api_dates(["2024-01-01T00:00:00Z", None], open_start="")
+    empty = DateDialect(open_start="")
+    open_end = _format_api_dates(["2024-01-01T00:00:00Z", None], dialect=empty)
     assert open_end == "2024-01-01T00:00:00Z/.."
-    assert _format_api_dates([None, None], open_start="") is None
-    assert _format_api_dates("../..", open_start="") is None
+    assert _format_api_dates([None, None], dialect=empty) is None
+    assert _format_api_dates("../..", dialect=empty) is None
 
 
 @pytest.mark.parametrize(
@@ -1130,14 +1161,14 @@ def test_format_api_dates_rejects_more_than_two_values():
 
 
 def test_the_duration_example_is_withheld_where_durations_are_rejected():
-    """``get_ratings`` refuses ISO 8601 durations, so the shared message must not offer
-    'P7D' on that path -- a caller following it would receive a second rejection."""
+    """Where the dialect rejects durations the message must not offer 'P7D' --
+    a caller following it would receive a second rejection."""
     with pytest.raises(ValueError) as allowed:
-        _format_api_dates(["a", "b", "c"], name="time")
-    with pytest.raises(ValueError) as refused:
         _format_api_dates(
-            ["a", "b", "c"], name="time", single_value_hint="an instant ('2020-01-01')"
+            ["a", "b", "c"], name="time", dialect=DateDialect(durations=True)
         )
+    with pytest.raises(ValueError) as refused:
+        _format_api_dates(["a", "b", "c"], name="time")
 
     assert "'P7D'" in str(allowed.value)
     assert "'P7D'" not in str(refused.value)

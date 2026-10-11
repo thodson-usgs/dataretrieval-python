@@ -35,6 +35,7 @@ import httpx
 import pandas as pd
 
 import dataretrieval.ogc.chunking as chunking
+from dataretrieval.ogc.dates import _format_date_args
 from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.ogc.policy import (
     DEFAULT_DIALECT,
@@ -261,8 +262,8 @@ def get_ogc_data(
         Synthetic id columns to move to the end of a result frame (see
         :func:`_arrange_cols`). Defaults to an empty set.
     dialect : OgcDialect, optional
-        Per-API request quirks (CQL2-only collections, date-only collections).
-        Defaults to a plain OGC API with neither.
+        Where the target service departs from the standard (ADR 0014).
+        Defaults to a service that implements the standard and nothing more.
     cql_body : str, optional
         A verbatim CQL2 JSON body to POST against ``collection`` instead of
         building the query from ``args``. With a body, only the
@@ -304,6 +305,8 @@ def get_ogc_data(
     )
     convert_type = args.pop("convert_type", False)
     args = {k: v for k, v in args.items() if v is not None}
+    # Before planning, so the planner and every chunk see the wire string.
+    args = _format_date_args(args, collection, dialect.dates)
 
     # Choose one semantic frame shape for the whole request. Every page and
     # the all-empty finalizer receive these same values, so frame type never

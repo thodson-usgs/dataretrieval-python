@@ -1,7 +1,7 @@
 """Low-level OGC policy: the dialect type and control validation.
 
-This module is the one definition of the :class:`OgcDialect` type
-(per-API quirks the generic request builder needs) and OGC control validation.
+This module is the one definition of the dialect types (where a service
+departs from the standard, ADR 0014) and OGC control validation.
 It depends only on the stdlib, so any OGC submodule can import it without
 creating cycles.
 
@@ -32,50 +32,77 @@ def _require_positive_int(
 
 
 # ---------------------------------------------------------------------------
-# Dialect type
+# Dialect types
 # ---------------------------------------------------------------------------
+# Each field is one way a service departs from the OGC standard, and its default
+# is the standard (ADR 0014). The adapter that sets a field says which service
+# needs it and why.
+
+
+@dataclass(frozen=True)
+class DateDialect:
+    """How a service departs from the standard ``datetime`` grammar.
+
+    Read only by :mod:`dataretrieval.ogc.dates`, so a service that shares the
+    grammar without being an OGC Features API can be given one alone.
+
+    Attributes
+    ----------
+    params : frozenset[str]
+        Request parameters that carry a date or a range. The standard has one,
+        ``datetime``; a service that filters on other temporal properties names
+        them all here.
+    date_only_collections : frozenset[str]
+        Collections whose date parameters are sent as ``YYYY-MM-DD`` rather
+        than a UTC timestamp.
+    always_datetime : frozenset[str]
+        Parameters sent as a UTC timestamp even in a date-only collection.
+    open_start : str
+        How the open start of a range is spelled: ``".."`` (``"../2024-01-01"``)
+        or ``""`` (``"/2024-01-01"``). The standard allows both; a deployment
+        may accept only one. An open end is always ``".."``.
+    durations : bool
+        Whether a lone ISO 8601 duration (``"P7D"``) is sent as given. The
+        standard does not define durations, so by default one raises
+        ``ValueError`` before any request is sent.
+    """
+
+    params: frozenset[str] = frozenset({"datetime"})
+    date_only_collections: frozenset[str] = field(default_factory=frozenset)
+    always_datetime: frozenset[str] = field(default_factory=frozenset)
+    open_start: str = ".."
+    durations: bool = False
 
 
 @dataclass(frozen=True)
 class OgcDialect:
-    """Per-API differences the generic request builder must handle.
+    """How a service departs from OGC API Features, grouped by what reads it.
 
     Attributes
     ----------
-    cql2_services : frozenset[str]
+    cql2_collections : frozenset[str]
         Collections that don't accept comma-separated multi-value GET
         parameters and so must be queried via POST with a CQL2 JSON body.
-    date_only_services : frozenset[str]
-        Collections whose time arguments are rendered date-only
-        (``YYYY-MM-DD``) rather than as a full UTC datetime. The
-        ``last_modified`` parameter is always rendered as a full datetime
-        regardless of this set.
+        Read by request construction.
+    dates : DateDialect
+        Date parameters and how they are spelled; see :class:`DateDialect`.
     time_cols : frozenset[str]
-        Result columns to coerce to datetime when ``convert_type`` is set. Empty by
-        default, so the generic engine holds no API-specific column list; each API
-        supplies its own.
+        Result columns to coerce to datetime when ``convert_type`` is set.
+        Read by result shaping, as are the next two.
     numerical_cols : frozenset[str]
         Result columns to coerce to numeric when ``convert_type`` is set.
     sort_cols : tuple[str, ...]
         Columns to sort the combined result by, in priority order. Sorting
         is applied only when the first (primary) column is present; any
         later columns also present are added as secondary keys.
-    open_start : str
-        How the API spells the open start of a date range: ``".."``
-        (``"../2024-01-01"``, the default) or ``""`` (``"/2024-01-01"``).
-        OGC API Features allows both, but deployments differ in which they
-        accept: the Water Data API rejects the empty start with HTTP 400, and
-        the NGWMN firewall rejects ``"../"`` with HTTP 403.
     """
 
-    cql2_services: frozenset[str] = field(default_factory=frozenset)
-    date_only_services: frozenset[str] = field(default_factory=frozenset)
+    cql2_collections: frozenset[str] = field(default_factory=frozenset)
+    dates: DateDialect = field(default_factory=DateDialect)
     time_cols: frozenset[str] = field(default_factory=frozenset)
     numerical_cols: frozenset[str] = field(default_factory=frozenset)
     sort_cols: tuple[str, ...] = field(default_factory=tuple)
-    open_start: str = ".."
 
 
-# Default dialect: a plain OGC API with no CQL2-only collections and no
-# date-only collections (every time argument rendered as a full UTC datetime).
+# A service that implements the standard and nothing more.
 DEFAULT_DIALECT = OgcDialect()

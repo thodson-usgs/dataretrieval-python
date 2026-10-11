@@ -1,8 +1,11 @@
 """Date and datetime marshalling for OGC time parameters.
 
-Pure helpers that render the OGC getters' time-shaped arguments — single
-instants, two-element ``[start, end]`` ranges, ISO-8601 durations, and open
-``..`` bounds — into the wire form the API expects. No I/O, no engine state.
+Pure helpers that render a getter's date arguments -- single instants,
+two-element ``[start, end]`` ranges, and open ``..`` bounds -- into the
+``datetime`` grammar of OGC API Features. Which parameters carry dates, and
+where a service departs from that grammar, is the caller's
+:class:`~dataretrieval.ogc.policy.DateDialect` (ADR 0014). No I/O, no engine
+state.
 """
 
 from __future__ import annotations
@@ -11,9 +14,12 @@ import re
 from collections.abc import Iterable, Mapping
 from datetime import date as _date
 from datetime import datetime
+from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+from dataretrieval.ogc.policy import DateDialect
 
 _DATETIME_FORMATS = (
     "%Y-%m-%dT%H:%M:%S.%f%z",
@@ -31,16 +37,7 @@ _DATETIME_FORMATS = (
 # admits time-only forms like ``PT36H``.
 _DURATION_RE = re.compile(r"^[Pp]T?\d")
 
-
-# OGC API parameters that take a date/datetime value (single string,
-# two-element range, or interval/duration string) rather than a multi-value
-# string list. Used by ``_construct_api_requests`` to keep them out of the
-# POST/CQL2 multi-value path and to route them through ``_format_api_dates``,
-# and by the default ``_get_args`` no-normalize set to bypass string-iterable
-# normalization.
-_DATE_RANGE_PARAMS = frozenset(
-    {"datetime", "last_modified", "begin", "begin_utc", "end", "end_utc", "time"}
-)
+_STANDARD_DATES = DateDialect()
 
 
 def _parse_datetime(value: str) -> datetime | None:
@@ -161,9 +158,8 @@ def _split_interval(interval: str, *, name: str) -> tuple[str, str]:
     ``["2024-01-01T10:00:00", None]``.
 
     Raises ``ValueError`` naming *name* unless the string is two sides
-    separated by one ``"/"``, neither of them a duration: the Water Data and
-    NGWMN services answer ``"2024-01-01/P7D"`` and ``"P7D/2024-01-08"`` with
-    HTTP 400.
+    separated by one ``"/"``, neither of them a duration: the standard defines
+    an interval as two instants, so ``"2024-01-01/P7D"`` is not one.
     """
     sides = interval.split("/")
     if len(sides) != 2 or any(_DURATION_RE.match(side) for side in sides):
@@ -181,13 +177,50 @@ def _all_blank(items: list[_DateLike]) -> bool:
     return all(_is_blank(dt) for dt in items)
 
 
+def _reject_too_many(
+    items: list[_DateLike], *, name: str, dialect: DateDialect
+) -> NoReturn:
+    """Raise for more than two values, offering only forms *dialect* accepts."""
+    single = (
+        "an instant or a duration ('2020-01-01', 'P7D')"
+        if dialect.durations
+        else "an instant ('2020-01-01')"
+    )
+    raise ValueError(
+        f"{name} takes at most 2 values, got {len(items)}: {items!r}. "
+        f"Pass one value for {single}, "
+        "or two for a closed interval ('2020-01-01', '2020-12-31')."
+    )
+
+
+def _lone_duration(
+    items: list[_DateLike], *, name: str, dialect: DateDialect
+) -> str | None:
+    """The duration to send as given, if *items* is one; None otherwise.
+
+    Raises ``ValueError`` naming *name* for a duration *dialect* does not
+    accept.
+    """
+    if len(items) != 1 or not isinstance(items[0], str):
+        return None
+    value = items[0]
+    if not _DURATION_RE.match(value):
+        return None
+    if not dialect.durations:
+        raise ValueError(
+            f"{name} does not accept an ISO 8601 duration such as {value!r} "
+            "for this service. Pass a range instead, with None for an open "
+            "end, such as ['2024-01-01', None]."
+        )
+    return value
+
+
 def _format_api_dates(
     datetime_input: DateInput | None,
     date: bool = False,
     *,
     name: str = "date input",
-    single_value_hint: str = "an instant or a duration ('2020-01-01', 'P7D')",
-    open_start: str = _OPEN_BOUND,
+    dialect: DateDialect = _STANDARD_DATES,
 ) -> str | None:
     """
     Formats date or datetime input(s) for use with an API.
@@ -201,10 +234,10 @@ def _format_api_dates(
         A single date/datetime or a list of one or two of them. Each may be a
         ``datetime.date``, ``datetime.datetime`` or ``pandas.Timestamp`` (a
         naive one is read in the local time zone, as a naive string is), or a
-        string. Strings accept formats like "%Y-%m-%d %H:%M:%S", ISO 8601 (with or
-        without ``Z``/numeric offset), or relative periods (e.g., "P7D" /
-        "PT36H"). Range endpoints may be ``None``/``NaN``/empty or ``".."``
-        to denote a half-bounded range.
+        string. Strings accept formats like "%Y-%m-%d %H:%M:%S", ISO 8601
+        (with or without ``Z``/numeric offset), or, where *dialect* accepts
+        them, a lone duration ("P7D", "PT36H"). Range endpoints may be
+        ``None``/``NaN``/empty or ``".."`` to denote a half-bounded range.
     date : bool, optional
         If True, uses only the date portion ("YYYY-MM-DD"). If False (default),
         returns full datetime in UTC ISO 8601 format ("YYYY-MM-DDTHH:MM:SSZ").
@@ -213,17 +246,10 @@ def _format_api_dates(
         every message raised here. Defaults to a generic "date input"; pass
         the real parameter name (``"time"``, ``"last_modified"``) so a caller
         correcting the error edits an argument their getter accepts.
-    single_value_hint : str, optional
-        How the "too many values" message describes an acceptable single
-        value. Wording only -- a getter that rejects some of the default's
-        forms (``get_ratings`` rejects durations) enforces that itself and
-        passes a hint naming only what it accepts, so the remedy does not
-        direct a caller to a value that is rejected.
-    open_start : str, optional
-        How the target API spells the open start of a range (``".."``
-        by default). OGC API Features and STAC also allow an empty string,
-        ``"/2024-01-01"``, which an API whose firewall rejects ``"../"`` needs
-        instead; see :attr:`OgcDialect.open_start`. An open end is always
+    dialect : DateDialect, optional
+        Where the target service departs from the standard grammar: whether
+        it accepts a lone duration and how it spells an open start. Defaults
+        to the standard, which accepts no duration and spells an open start
         ``".."``.
 
     Returns
@@ -238,8 +264,9 @@ def _format_api_dates(
     Raises
     ------
     ValueError
-        If `datetime_input` contains more than two values, or an element that
-        is not blank matches no supported format or is of another type.
+        If `datetime_input` contains more than two values, an element that
+        is not blank matches no supported format or is of another type, or it
+        is a lone duration that *dialect* does not accept.
 
     Notes
     -----
@@ -247,8 +274,8 @@ def _format_api_dates(
       or ``".."`` endpoint is rendered as ``".."`` to denote an open bound
       (e.g. ``"2024-01-01/.."``); the range is only None when *every* element
       is blank/NA/``".."``.
-    - Supports ISO 8601 durations such as "P7D" and "PT36H", which are passed
-      through unchanged.
+    - A lone ISO 8601 duration such as "P7D" or "PT36H" is passed through
+      unchanged when ``dialect.durations`` is set, and rejected otherwise.
     - A single string containing ``"/"`` is an interval: it is split into the
       two-value form, so ``"2024-01-01/.."`` and ``["2024-01-01", None]`` are
       formatted alike. A duration is not accepted as either side.
@@ -268,17 +295,34 @@ def _format_api_dates(
         return None
 
     if len(items) > 2:
-        raise ValueError(
-            f"{name} takes at most 2 values, got {len(items)}: {items!r}. "
-            f"Pass one value for {single_value_hint}, "
-            "or two for a closed interval ('2020-01-01', '2020-12-31')."
-        )
+        _reject_too_many(items, name=name, dialect=dialect)
 
-    # Pass through a duration ("P7D", "PT36H")
-    if len(items) == 1 and isinstance(items[0], str) and _DURATION_RE.match(items[0]):
-        return items[0]
+    duration = _lone_duration(items, name=name, dialect=dialect)
+    if duration is not None:
+        return duration
 
     formatted = [_format_one(dt, date=date, name=name) for dt in items]
     if len(formatted) == 2 and formatted[0] == _OPEN_BOUND:
-        formatted[0] = open_start
+        formatted[0] = dialect.open_start
     return "/".join(formatted)
+
+
+def _format_date_args(
+    args: dict[str, Any], collection: str, dialect: DateDialect
+) -> dict[str, Any]:
+    """Render every date parameter *dialect* names in *args* to its wire form.
+
+    Returns a new mapping; *args* is not modified. Each value is formatted
+    once, here, so the chunk planner and every chunk see the same string
+    (ADR 0014).
+    """
+    date_only = collection in dialect.date_only_collections
+    out = dict(args)
+    for key in dialect.params & args.keys():
+        out[key] = _format_api_dates(
+            args[key],
+            date=date_only and key not in dialect.always_datetime,
+            name=key,
+            dialect=dialect,
+        )
+    return out

@@ -20,14 +20,10 @@ import pandas as pd
 
 from dataretrieval._validation import render_options
 from dataretrieval.exceptions import DataRetrievalError, SkippedRatingWarning
-from dataretrieval.ogc.dates import (
-    _DURATION_RE,
-    DateInput,
-    _coerce_to_list,
-    _format_api_dates,
-)
+from dataretrieval.ogc.dates import DateInput, _format_api_dates
 from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.ogc.filters import _quote_cql_str
+from dataretrieval.ogc.policy import DateDialect
 from dataretrieval.ogc.requests import _check_monitoring_location_id
 from dataretrieval.rdb import extract_rdb_comment, read_rdb
 from dataretrieval.transport.fanout import FanOut, active_client
@@ -41,6 +37,12 @@ from dataretrieval.waterdata.endpoints import ratings_catalog_url
 
 __all__ = ["get_ratings"]
 
+
+# Where the STAC ratings catalog departs from the standard ``datetime`` grammar
+# (ADR 0014; observed 2026-10-11). It rejects a lone duration (HTTP 400), as the
+# standard default does, and its firewall answers ``datetime=../2026-01-01``
+# with HTTP 403, so an open start is sent empty, which STAC reads as open.
+_STAC_DATES = DateDialect(open_start="")
 
 RATING_FILE_TYPE = Literal["exsa", "base", "corr"]
 _VALID_FILE_TYPES = get_args(RATING_FILE_TYPE)
@@ -182,19 +184,7 @@ def get_ratings(
     monitoring_location_id = _check_monitoring_location_id(monitoring_location_id)
     file_types = _as_list(file_type)
     _validate_file_types(file_types)
-    _validate_time_no_duration(time)
-    time_str = (
-        _format_api_dates(
-            time,
-            name="time",
-            single_value_hint="an instant ('2020-01-01')",
-            # The STAC firewall answers ``datetime=../2026-01-01`` with HTTP
-            # 403; STAC reads an empty start (``/2026-01-01``) as open.
-            open_start="",
-        )
-        if time is not None
-        else None
-    )
+    time_str = _format_api_dates(time, name="time", dialect=_STAC_DATES)
 
     # Match R: set file_type server-side only when one type is requested.
     server_file_type = file_types[0] if len(file_types) == 1 else None
@@ -225,20 +215,6 @@ def _validate_file_types(file_types: list[str]) -> None:
         raise ValueError(
             f"Invalid file_type: {render_options(invalid)}. "
             f"Valid options are: {render_options(_VALID_FILE_TYPES)}."
-        )
-
-
-def _validate_time_no_duration(time: DateInput | None) -> None:
-    """Raise ValueError if ``time`` contains an ISO 8601 duration."""
-    if time is None:
-        return
-    # ``_coerce_to_list`` keeps a lone ``date``/``Timestamp`` whole, where
-    # ``_as_list`` would try to iterate it.
-    values = _coerce_to_list(time, "time")
-    if any(isinstance(v, str) and _DURATION_RE.match(v) for v in values):
-        raise ValueError(
-            "ISO 8601 durations (e.g. 'P7D') are not supported in `time` "
-            "for the rating-curve service. Provide a date or interval instead."
         )
 
 

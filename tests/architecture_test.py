@@ -677,7 +677,10 @@ def test_date_arguments_are_annotated_date_input() -> None:
     import inspect
 
     from dataretrieval import ngwmn, waterdata
-    from dataretrieval.ogc.dates import _DATE_RANGE_PARAMS
+    from dataretrieval.ngwmn import NGWMN_DIALECT
+    from dataretrieval.waterdata.utils import WATERDATA_DIALECT
+
+    date_params = WATERDATA_DIALECT.dates.params | NGWMN_DIALECT.dates.params
 
     checked, wrong = 0, {}
     for module in (waterdata, ngwmn):
@@ -686,10 +689,79 @@ def test_date_arguments_are_annotated_date_input() -> None:
             if not inspect.isfunction(getter):
                 continue
             for param in inspect.signature(getter).parameters.values():
-                if param.name not in _DATE_RANGE_PARAMS:
+                if param.name not in date_params:
                     continue
                 checked += 1
                 if param.annotation != "DateInput | None":
                     wrong[f"{module.__name__}.{name}({param.name})"] = param.annotation
     assert checked, "found no date arguments; the check is not looking anywhere"
     assert not wrong, f"annotate these DateInput | None: {wrong}"
+
+
+#: Dialect names the OGC core still contains as literals, each recorded in
+#: ADR 0014 with its removal condition. Mapping: name -> modules allowed.
+_DIALECT_LITERAL_VARIANCES = {
+    # The ``AGENCY-ID`` validation in ``prepare_request_args``.
+    "monitoring_location_id": {"requests.py"},
+}
+
+
+def _code_string_literals(path: Path) -> list[tuple[int, str]]:
+    """String constants in *path*, excluding docstrings."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        )
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
+def test_ogc_core_names_no_dialect_value() -> None:
+    """ADR 0014: the OGC core implements the standard and reads every service
+    deviation from a dialect. A parameter, collection, or column that a
+    shipped dialect lists must not also appear as a literal in the core --
+    that is a deviation hard-coded for every service."""
+    from dataretrieval.ngwmn import NGWMN_DIALECT
+    from dataretrieval.ogc.policy import DEFAULT_DIALECT, OgcDialect
+    from dataretrieval.waterdata.ratings import _STAC_DATES
+    from dataretrieval.waterdata.utils import WATERDATA_DIALECT
+
+    def names(dialect: OgcDialect) -> set[str]:
+        dates = dialect.dates
+        return {
+            *dialect.cql2_collections,
+            *dialect.time_cols,
+            *dialect.numerical_cols,
+            *dialect.sort_cols,
+            *dates.params,
+            *dates.date_only_collections,
+            *dates.always_datetime,
+        }
+
+    shipped = names(WATERDATA_DIALECT) | names(NGWMN_DIALECT) | set(_STAC_DATES.params)
+    shipped -= set(DEFAULT_DIALECT.dates.params)  # the standard's own names
+    assert "time" in shipped, "the check is not reading the shipped dialects"
+
+    found = [
+        f"ogc/{path.name}:{line} {value!r}"
+        for path in sorted((PACKAGE_ROOT / "ogc").glob("*.py"))
+        for line, value in _code_string_literals(path)
+        if value in shipped
+        and path.name not in _DIALECT_LITERAL_VARIANCES.get(value, set())
+    ]
+    assert not found, (
+        "the OGC core names a value a dialect owns; read it from the dialect "
+        f"instead (ADR 0014): {found}"
+    )

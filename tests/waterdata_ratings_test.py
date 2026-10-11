@@ -44,8 +44,9 @@ def test_get_ratings_rejects_invalid_file_type():
 
 
 def test_get_ratings_rejects_iso_8601_duration_in_time():
-    """STAC ratings doesn't accept ISO 8601 durations; raise a clear error."""
-    with pytest.raises(ValueError, match=r"durations.*not supported"):
+    """STAC ratings answers a duration with HTTP 400; its date dialect leaves
+    durations at the standard default, so one raises before any request."""
+    with pytest.raises(ValueError, match=r"^time does not accept an ISO 8601 duration"):
         get_ratings(
             monitoring_location_id="USGS-01104475",
             time="P7D",
