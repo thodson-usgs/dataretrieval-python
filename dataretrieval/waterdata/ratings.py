@@ -20,7 +20,12 @@ import pandas as pd
 
 from dataretrieval._validation import render_options
 from dataretrieval.exceptions import DataRetrievalError, SkippedRatingWarning
-from dataretrieval.ogc.dates import _DURATION_RE, _coerce_to_list, _format_api_dates
+from dataretrieval.ogc.dates import (
+    _DURATION_RE,
+    DateInput,
+    _coerce_to_list,
+    _format_api_dates,
+)
 from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.ogc.filters import _quote_cql_str
 from dataretrieval.ogc.requests import _check_monitoring_location_id
@@ -45,7 +50,7 @@ def get_ratings(
     monitoring_location_id: str | Iterable[str] | None = None,
     file_type: RATING_FILE_TYPE | list[RATING_FILE_TYPE] = "exsa",
     file_path: str | None = None,
-    time: str | list[str] | None = None,
+    time: DateInput | None = None,
     bbox: list[float] | None = None,
     limit: int = 10000,
     download_and_parse: bool = True,
@@ -81,12 +86,13 @@ def get_ratings(
         (the default), the parsed ``DataFrame`` is returned without
         persisting the bytes to disk; ``df.attrs["url"]`` still records
         where each rating came from.
-    time : string or list of strings, optional
+    time : string, date, or list, optional
         STAC ``datetime`` filter (passed through verbatim under that name)
-        — a single date / datetime, an interval (``"start/end"``,
-        optionally half-bounded with ``..``), or a list of two values
-        with ``None`` for an open end (``["2026-04-29", None]``). A value
-        that is not a date raises ``ValueError``. ISO 8601 *durations*
+        — a single date / datetime (a string, or a ``datetime.date``,
+        ``datetime.datetime``, or ``pandas.Timestamp``), an interval
+        (``"start/end"``, optionally half-bounded with ``..``), or a list of
+        two values with ``None`` for an open end (``["2026-04-29", None]``). A
+        value that is not a date raises ``ValueError``. ISO 8601 *durations*
         (``"P1M"``, ``"PT36H"``, …) are **not** supported by the
         rating-curve service; passing one raises ``ValueError``.
     bbox : list of numbers, optional
@@ -217,7 +223,7 @@ def _validate_file_types(file_types: list[str]) -> None:
         )
 
 
-def _validate_time_no_duration(time: str | list[str] | None) -> None:
+def _validate_time_no_duration(time: DateInput | None) -> None:
     """Raise ValueError if ``time`` contains an ISO 8601 duration."""
     if time is None:
         return

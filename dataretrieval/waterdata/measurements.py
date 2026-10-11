@@ -19,6 +19,7 @@ from dataretrieval.waterdata.utils import (
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
+    from dataretrieval.ogc import DateInput
     from dataretrieval.ogc.filters import FILTER_LANG
 
 
@@ -32,13 +33,13 @@ def get_field_measurements(
     unit_of_measure: str | Iterable[str] | None = None,
     qualifier: str | Iterable[str] | None = None,
     value: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
     observing_procedure: str | Iterable[str] | None = None,
     vertical_datum: str | Iterable[str] | None = None,
     measuring_agency: str | Iterable[str] | None = None,
     sublocation_identifier: str | Iterable[str] | None = None,
     skip_geometry: bool | None = None,
-    time: str | Iterable[str] | None = None,
+    time: DateInput | None = None,
     bbox: list[float] | None = None,
     limit: int | None = None,
     filter: str | None = None,
@@ -101,7 +102,7 @@ def get_field_measurements(
     value : string or iterable of strings, optional
         The value of the observation. Values are transmitted as strings in
         the JSON response format to preserve precision.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         The last time a record was refreshed in our database. A refresh may
         happen due to regular operational processes and does not necessarily
         indicate that anything about the measurement has changed. You can query
@@ -117,6 +118,8 @@ def get_field_measurements(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -134,7 +137,7 @@ def get_field_measurements(
         If True, the response omits the geometry of each feature and the
         returned object is a data frame with no spatial information. The USGS
         Water Data APIs use camelCase "skipGeometry" in CQL2 queries.
-    time : string, optional
+    time : string, date, or list, optional
         The date an observation represents. You can query this field using
         date-times or intervals, adhering to RFC 3339, or using ISO 8601
         duration objects. Intervals may be bounded or half-bounded (double-dots
@@ -150,6 +153,8 @@ def get_field_measurements(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -243,8 +248,8 @@ def get_peaks(
     parameter_code: str | Iterable[str] | None = None,
     time_series_id: str | Iterable[str] | None = None,
     unit_of_measure: str | Iterable[str] | None = None,
-    time: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
+    time: DateInput | None = None,
+    last_modified: DateInput | None = None,
     water_year: int | list[int] | None = None,
     year: int | list[int] | None = None,
     month: int | list[int] | None = None,
@@ -286,10 +291,10 @@ def get_peaks(
         ID of the time series the peak belongs to.
     unit_of_measure : string or iterable of strings, optional
         Human-readable units (e.g. ``"ft^3/s"``, ``"ft"``).
-    time : string, optional
+    time : string, date, or list, optional
         Datetime, interval, or duration filter on the peak's date.
         See :func:`get_time_series_metadata` for the full grammar.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         Same datetime grammar as ``time``; filters on the database
         last-modified timestamp (useful for incremental ETL polling).
     water_year, year, month, day : int or list of ints, optional
@@ -382,7 +387,7 @@ def get_channel(
     monitoring_location_id: str | Iterable[str] | None = None,
     field_visit_id: str | Iterable[str] | None = None,
     measurement_number: str | Iterable[str] | None = None,
-    time: str | Iterable[str] | None = None,
+    time: DateInput | None = None,
     channel_name: str | Iterable[str] | None = None,
     channel_flow: str | Iterable[str] | None = None,
     channel_flow_unit: str | Iterable[str] | None = None,
@@ -401,7 +406,7 @@ def get_channel(
     vertical_velocity_description: str | Iterable[str] | None = None,
     longitudinal_velocity_description: str | Iterable[str] | None = None,
     measurement_type: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
     channel_measurement_type: str | Iterable[str] | None = None,
     properties: str | Iterable[str] | None = None,
     skip_geometry: bool | None = None,
@@ -428,7 +433,7 @@ def get_channel(
         measurements may be made during a single field visit.
     measurement_number : string or iterable of strings, optional
         Measurement number.
-    time : string or iterable of strings, optional
+    time : string, date, or list, optional
         The date an observation represents. You can query this field using
         date-times or intervals, adhering to RFC 3339, or using ISO 8601
         duration objects. Intervals may be bounded or half-bounded (double-dots
@@ -444,6 +449,8 @@ def get_channel(
               "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
               for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+              or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or "PT36H"
               for the last 36 hours
 
@@ -483,7 +490,7 @@ def get_channel(
         The longitudinal velocity description.
     measurement_type : string or iterable of strings, optional
         The type of channel measurement.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         The last time a record was refreshed in our database. A refresh may
         happen due to regular operational processes and does not necessarily
         indicate that anything about the measurement has changed. You can query
@@ -499,6 +506,8 @@ def get_channel(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 

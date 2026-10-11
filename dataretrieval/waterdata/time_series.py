@@ -25,6 +25,7 @@ from dataretrieval.waterdata.utils import (
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
+    from dataretrieval.ogc import DateInput
     from dataretrieval.ogc.filters import FILTER_LANG
 
 
@@ -39,9 +40,9 @@ def get_daily(
     unit_of_measure: str | Iterable[str] | None = None,
     qualifier: str | Iterable[str] | None = None,
     value: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
     skip_geometry: bool | None = None,
-    time: str | Iterable[str] | None = None,
+    time: DateInput | None = None,
     bbox: list[float] | None = None,
     limit: int | None = None,
     filter: str | None = None,
@@ -117,7 +118,7 @@ def get_daily(
     value : string or iterable of strings, optional
         The value of the observation. Values are transmitted as strings in
         the JSON response format to preserve precision.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         The last time a record was refreshed in our database. A refresh may
         happen due to regular operational processes and does not necessarily
         indicate that anything about the measurement has changed. You can query
@@ -133,6 +134,8 @@ def get_daily(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -140,7 +143,7 @@ def get_daily(
         If True, the response omits the geometry of each feature and the
         returned object is a data frame with no spatial information. The USGS
         Water Data APIs use camelCase "skipGeometry" in CQL2 queries.
-    time : string, optional
+    time : string, date, or list, optional
         The date an observation represents. You can query this field using
         date-times or intervals, adhering to RFC 3339, or using ISO 8601
         duration objects. Intervals may be bounded or half-bounded (double-dots
@@ -156,6 +159,8 @@ def get_daily(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -275,8 +280,8 @@ def get_continuous(
     qualifier: str | Iterable[str] | None = None,
     method_category: str | Iterable[str] | None = None,
     value: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
-    time: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
+    time: DateInput | None = None,
     limit: int | None = None,
     filter: str | None = None,
     filter_lang: FILTER_LANG | None = None,
@@ -364,7 +369,7 @@ def get_continuous(
     value : string or iterable of strings, optional
         The value of the observation. Values are transmitted as strings in
         the JSON response format to preserve precision.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         The last time a record was refreshed in our database. A refresh may
         happen due to regular operational processes and does not necessarily
         indicate that anything about the measurement has changed. You can query
@@ -380,10 +385,12 @@ def get_continuous(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
-    time : string, optional
+    time : string, date, or list, optional
         The date an observation represents. You can query this field using
         date-times or intervals, adhering to RFC 3339, or using ISO 8601
         duration objects. Intervals may be bounded or half-bounded (double-dots
@@ -399,6 +406,8 @@ def get_continuous(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -486,9 +495,9 @@ def get_latest_continuous(
     unit_of_measure: str | Iterable[str] | None = None,
     qualifier: str | Iterable[str] | None = None,
     value: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
     skip_geometry: bool | None = None,
-    time: str | Iterable[str] | None = None,
+    time: DateInput | None = None,
     bbox: list[float] | None = None,
     limit: int | None = None,
     filter: str | None = None,
@@ -566,7 +575,7 @@ def get_latest_continuous(
     value : string or iterable of strings, optional
         The value of the observation. Values are transmitted as strings in
         the JSON response format to preserve precision.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         The last time a record was refreshed in our database. A refresh may
         happen due to regular operational processes and does not necessarily
         indicate that anything about the measurement has changed. You can query
@@ -582,6 +591,8 @@ def get_latest_continuous(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -589,7 +600,7 @@ def get_latest_continuous(
         If True, the response omits the geometry of each feature and the
         returned object is a data frame with no spatial information. The USGS
         Water Data APIs use camelCase "skipGeometry" in CQL2 queries.
-    time : string, optional
+    time : string, date, or list, optional
         The date an observation represents. You can query this field using
         date-times or intervals, adhering to RFC 3339, or using ISO 8601
         duration objects. Intervals may be bounded or half-bounded (double-dots
@@ -605,6 +616,8 @@ def get_latest_continuous(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -703,9 +716,9 @@ def get_latest_daily(
     unit_of_measure: str | Iterable[str] | None = None,
     qualifier: str | Iterable[str] | None = None,
     value: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
     skip_geometry: bool | None = None,
-    time: str | Iterable[str] | None = None,
+    time: DateInput | None = None,
     bbox: list[float] | None = None,
     limit: int | None = None,
     filter: str | None = None,
@@ -785,7 +798,7 @@ def get_latest_daily(
     value : string or iterable of strings, optional
         The value of the observation. Values are transmitted as strings in
         the JSON response format to preserve precision.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         The last time a record was refreshed in our database. A refresh may
         happen due to regular operational processes and does not necessarily
         indicate that anything about the measurement has changed. You can query
@@ -801,6 +814,8 @@ def get_latest_daily(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
@@ -808,7 +823,7 @@ def get_latest_daily(
         If True, the response omits the geometry of each feature and the
         returned object is a data frame with no spatial information. The USGS
         Water Data APIs use camelCase "skipGeometry" in CQL2 queries.
-    time : string, optional
+    time : string, date, or list, optional
         The date an observation represents. You can query this field using
         date-times or intervals, adhering to RFC 3339, or using ISO 8601
         duration objects. Intervals may be bounded or half-bounded (double-dots
@@ -824,6 +839,8 @@ def get_latest_daily(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 

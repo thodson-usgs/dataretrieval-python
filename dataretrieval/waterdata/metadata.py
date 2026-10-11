@@ -22,6 +22,7 @@ from dataretrieval.waterdata.utils import (
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
+    from dataretrieval.ogc import DateInput
     from dataretrieval.ogc.filters import FILTER_LANG
 
 
@@ -400,11 +401,11 @@ def get_time_series_metadata(
     hydrologic_unit_code: str | Iterable[str] | None = None,
     state: str | Iterable[str] | None = None,
     state_name: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
-    begin: str | Iterable[str] | None = None,
-    end: str | Iterable[str] | None = None,
-    begin_utc: str | Iterable[str] | None = None,
-    end_utc: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
+    begin: DateInput | None = None,
+    end: DateInput | None = None,
+    begin_utc: DateInput | None = None,
+    end_utc: DateInput | None = None,
     unit_of_measure: str | Iterable[str] | None = None,
     computation_period_identifier: str | Iterable[str] | None = None,
     computation_identifier: str | Iterable[str] | None = None,
@@ -484,7 +485,7 @@ def get_time_series_metadata(
         Deprecated, as ``state`` is. Use :func:`get_combined_metadata` with
         ``state_name`` instead. The name of the state or state equivalent in
         which the monitoring location is located.
-    last_modified : string, optional
+    last_modified : string, date, or list, optional
         The last time a record was refreshed in our database. A refresh may
         happen due to regular operational processes and does not necessarily
         indicate that anything about the measurement has changed. You can query
@@ -500,10 +501,12 @@ def get_time_series_metadata(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or "PT36H"
                 for the last 36 hours
 
-    begin : string or iterable of strings, optional
+    begin : string, date, or list, optional
         The datetime of the earliest observation in the time series, in UTC
         with a time zone. Together with end, this field represents the period
         of record of a time series. Note that some time series may have large
@@ -520,10 +523,12 @@ def get_time_series_metadata(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
-    end : string or iterable of strings, optional
+    end : string, date, or list, optional
         The datetime of the most recent observation in the time series, in UTC
         with a time zone. Data returned by this endpoint updates at most once
         per day, and potentially less frequently than that, and as such there
@@ -543,13 +548,15 @@ def get_time_series_metadata(
                 "../2018-03-18T12:31:12Z"
             * A list of two values: ["2018-02-12", "2018-03-18"], with None
                 for an open end: ["2018-02-12", None]
+            * A datetime.date, datetime.datetime, or pandas.Timestamp, alone
+                or in the list: [df.index.min(), None]
             * Duration objects: "P1M" for data from the past month or
                 "PT36H" for the last 36 hours
 
-    begin_utc : string or iterable of strings, optional
+    begin_utc : string, date, or list, optional
         Deprecated, as ``hydrologic_unit_code`` is: in v1, ``begin`` holds this
         value.
-    end_utc : string or iterable of strings, optional
+    end_utc : string, date, or list, optional
         Deprecated, as ``hydrologic_unit_code`` is: in v1, ``end`` holds this
         value.
     unit_of_measure : string or iterable of strings, optional
@@ -671,9 +678,9 @@ def get_combined_metadata(
     primary: str | Iterable[str] | None = None,
     parent_time_series_id: str | Iterable[str] | None = None,
     web_description: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
-    begin: str | Iterable[str] | None = None,
-    end: str | Iterable[str] | None = None,
+    last_modified: DateInput | None = None,
+    begin: DateInput | None = None,
+    end: DateInput | None = None,
     agency_code: str | Iterable[str] | None = None,
     agency_name: str | Iterable[str] | None = None,
     monitoring_location_number: str | Iterable[str] | None = None,
@@ -787,7 +794,7 @@ def get_combined_metadata(
     web_description : string or iterable of strings, optional
         A description of what this time series represents, as used by
         WDFN and other USGS data dissemination products.
-    last_modified, begin, end : string, optional
+    last_modified, begin, end : string, date, or list, optional
         Datetime fields that accept either an RFC 3339 datetime, an
         interval (``"start/end"``, optionally half-bounded with ``..``),
         or an ISO 8601 duration (e.g. ``"P1M"``, ``"PT36H"``). See
@@ -921,9 +928,9 @@ def get_field_measurements_metadata(
     parameter_code: str | Iterable[str] | None = None,
     parameter_name: str | Iterable[str] | None = None,
     parameter_description: str | Iterable[str] | None = None,
-    begin: str | Iterable[str] | None = None,
-    end: str | Iterable[str] | None = None,
-    last_modified: str | Iterable[str] | None = None,
+    begin: DateInput | None = None,
+    end: DateInput | None = None,
+    last_modified: DateInput | None = None,
     sublocation_identifier: str | Iterable[str] | None = None,
     properties: str | Iterable[str] | None = None,
     skip_geometry: bool | None = None,
@@ -962,7 +969,7 @@ def get_field_measurements_metadata(
         A human-understandable name corresponding to ``parameter_code``.
     parameter_description : string or iterable of strings, optional
         A human-readable description of what is being measured.
-    begin, end, last_modified : string, optional
+    begin, end, last_modified : string, date, or list, optional
         Datetime fields that accept either an RFC 3339 datetime, an
         interval (``"start/end"``, optionally half-bounded with ``..``),
         or an ISO 8601 duration (e.g. ``"P1M"``, ``"PT36H"``). See

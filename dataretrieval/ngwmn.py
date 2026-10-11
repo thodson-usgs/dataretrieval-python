@@ -34,7 +34,7 @@ from dataretrieval.configuration import (
     _Retrying,
 )
 from dataretrieval.credentials import WATERDATA_BASE_URL
-from dataretrieval.ogc import OgcDialect, get_ogc_data, prepare_request_args
+from dataretrieval.ogc import DateInput, OgcDialect, get_ogc_data, prepare_request_args
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
@@ -237,7 +237,7 @@ def get_water_level(
     water_level_above_site_datum_ft: str | Iterable[str] | None = None,
     monitoring_location_vertical_datum: str | Iterable[str] | None = None,
     water_level_above_navd88_ft: str | Iterable[str] | None = None,
-    datetime: str | Iterable[str] | None = None,
+    datetime: DateInput | None = None,
     properties: str | Iterable[str] | None = None,
     limit: int | None = None,
     convert_type: bool = True,
@@ -263,10 +263,11 @@ def get_water_level(
         Water-level value filter (feet above NAVD 88).
     monitoring_location_vertical_datum : str or iterable of str, optional
         Vertical datum of the reported water level.
-    datetime : str or iterable of str, optional
+    datetime : str, date, or list, optional
         Temporal filter — a single instant or a two-element ``[start, end]``
-        range (ISO-8601 dates/datetimes); ``None`` or ``".."`` denotes an
-        open end.
+        range, each an ISO 8601 date/datetime string or a ``datetime.date``,
+        ``datetime.datetime``, or ``pandas.Timestamp``; ``None`` or ``".."``
+        denotes an open end.
     properties : str or iterable of str, optional
         Subset of columns to return. ``None`` (default) returns all columns.
     limit : int, optional

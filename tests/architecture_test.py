@@ -667,3 +667,29 @@ def test_adr_references_resolve_to_a_record() -> None:
     assert not dangling, "citations name no such decision record:\n  " + "\n  ".join(
         dangling
     )
+
+
+def test_date_arguments_are_annotated_date_input() -> None:
+    """Every public OGC getter parameter that ``_format_api_dates`` reads is
+    annotated ``DateInput | None``, so a type checker accepts the ``date``,
+    ``datetime``, and ``Timestamp`` values the formatter does. A new getter
+    copying the ``str | Iterable[str]`` of its neighbours fails here."""
+    import inspect
+
+    from dataretrieval import ngwmn, waterdata
+    from dataretrieval.ogc.dates import _DATE_RANGE_PARAMS
+
+    checked, wrong = 0, {}
+    for module in (waterdata, ngwmn):
+        for name in module.__all__:
+            getter = getattr(module, name)
+            if not inspect.isfunction(getter):
+                continue
+            for param in inspect.signature(getter).parameters.values():
+                if param.name not in _DATE_RANGE_PARAMS:
+                    continue
+                checked += 1
+                if param.annotation != "DateInput | None":
+                    wrong[f"{module.__name__}.{name}({param.name})"] = param.annotation
+    assert checked, "found no date arguments; the check is not looking anywhere"
+    assert not wrong, f"annotate these DateInput | None: {wrong}"

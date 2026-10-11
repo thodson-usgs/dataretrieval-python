@@ -8,7 +8,7 @@ instants, two-element ``[start, end]`` ranges, ISO-8601 durations, and open
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from datetime import date as _date
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -71,6 +71,14 @@ _OPEN_BOUND = ".."
 # with ``None`` (or ``NaN`` / ``NaT``) for an open bound.
 _DateLike = str | _date | None
 
+# A getter's date argument (``time``, ``begin``, ``end``, ``datetime``,
+# ``last_modified``): one value, or a range of one or two elements with
+# ``None`` for an open end. Getters annotate it ``DateInput | None``.
+# ``NaT`` is accepted at runtime but left out: ``pandas.api.typing.NaTType``
+# needs pandas 2.1, and without pandas-stubs it is ``Any``, which would make
+# the whole alias accept anything.
+DateInput = str | _date | Iterable[_DateLike]
+
 
 def _is_blank(dt: _DateLike) -> bool:
     """True for a None, NaN, empty-string, or ``..`` element.
@@ -129,7 +137,7 @@ def _format_one(dt: _DateLike, *, date: bool, name: str) -> str:
 
 
 def _coerce_to_list(
-    datetime_input: str | _date | Sequence[_DateLike],
+    datetime_input: DateInput,
     name: str = "date input",
 ) -> list[_DateLike]:
     """Normalize datetime input to a list, raising on invalid shapes."""
@@ -156,7 +164,7 @@ def _all_blank(items: list[_DateLike]) -> bool:
 
 
 def _format_api_dates(
-    datetime_input: str | _date | Sequence[_DateLike] | None,
+    datetime_input: DateInput | None,
     date: bool = False,
     *,
     name: str = "date input",
