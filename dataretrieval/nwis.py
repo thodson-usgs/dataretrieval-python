@@ -5,13 +5,11 @@ USGS is decommissioning the legacy waterservices endpoints this module called
 only so that every spelling of the import -- ``import dataretrieval.nwis``,
 ``from dataretrieval import nwis``, ``from dataretrieval.nwis import get_dv`` --
 fails with a message that names the replacement, rather than a bare
-``ModuleNotFoundError``.
+``ModuleNotFoundError``. Attribute access after ``import dataretrieval``
+(``dataretrieval.nwis.get_dv()``) never loads this file; the package
+``__getattr__`` raises the same message for that case.
 """
 
-raise ImportError(
-    "dataretrieval.nwis has been removed, because USGS is retiring the legacy "
-    "waterservices endpoints it called. Use dataretrieval.waterdata instead, or "
-    "dataretrieval.nwdc for water use. To keep using nwis while the endpoints "
-    "remain online, pin the last release that includes it: "
-    'pip install "dataretrieval<=1.4.0"'
-)
+from dataretrieval import _NWIS_REMOVED_MESSAGE
+
+raise ImportError(_NWIS_REMOVED_MESSAGE)

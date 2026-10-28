@@ -48,7 +48,9 @@ Compliance
 
 ``dataretrieval/nwis.py`` is a stub: importing it raises ``ImportError`` naming
 the Water Data replacements and the last release that includes the module
-(1.4.0).
+(1.4.0). Attribute access after ``import dataretrieval``, which never loads the
+stub, raises ``AttributeError`` with the same message from the package
+``__getattr__``. ``tests/contracts/removed_modules_test.py`` covers both.
 
 Notes
 -----
@@ -59,3 +61,7 @@ was rewritten at removal: it described the deprecation tests that verified one
 warning per public call and named Water Data replacements, and the
 ``nwis-quarantine`` contract in ``.importlinter``. Both were removed with the
 module.
+
+The Compliance sentence on attribute access was added after removal:
+``import dataretrieval`` followed by ``dataretrieval.nwis`` raised a bare
+``AttributeError`` that named no replacement.
