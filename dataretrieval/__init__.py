@@ -75,11 +75,6 @@ from dataretrieval.interruptions import (
     ServiceInterrupted,
 )
 
-# Parallel-chunks control (a context manager). Defined with the chunker in
-# ``dataretrieval.ogc.chunking``; re-exported here for a stable public path
-# ``from dataretrieval import parallel_chunks``.
-from dataretrieval.ogc.chunking import parallel_chunks
-
 from . import (
     exceptions,
     ngwmn,
@@ -114,6 +109,19 @@ if not TYPE_CHECKING:
         """
         if name == "nwis":
             raise AttributeError(_NWIS_REMOVED_MESSAGE)
+        if name == "parallel_chunks":
+            # Only the OGC adapters read it; at the top level it read as
+            # package-wide while a wqp/nwdc/nldi/streamstats call ignored it
+            # (ADR 0010). Resolved lazily so the deprecation fires on use.
+            from dataretrieval._deprecation import REMOVALS, warn_deprecated
+
+            warn_deprecated(
+                "`dataretrieval.parallel_chunks`",
+                replacement="`dataretrieval.waterdata.parallel_chunks`",
+                removal=REMOVALS["parallel_chunks"],
+                detail="Only the Water Data and NGWMN getters read it.",
+            )
+            return waterdata.parallel_chunks
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -150,7 +158,5 @@ __all__ = [
     "FanOutInterrupted",
     "QuotaExhausted",
     "ServiceInterrupted",
-    # parallel-chunks control (defined in ogc.chunking)
-    "parallel_chunks",
     "__version__",
 ]

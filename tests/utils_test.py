@@ -279,19 +279,28 @@ class Test_error_taxonomy:
         for name in module.__all__:
             assert getattr(module, name) is getattr(dataretrieval, name)
 
-    def test_parallel_chunks_exported_at_top_level_and_waterdata(self):
-        """The ``parallel_chunks`` context manager is reachable both from the top
-        level (``from dataretrieval import parallel_chunks``) and from the
-        user-facing ``dataretrieval.waterdata`` namespace, and both resolve to
-        the single object defined in ``dataretrieval.ogc.chunking``."""
+    def test_top_level_parallel_chunks_is_deprecated_for_waterdata(self):
+        """``dataretrieval.parallel_chunks`` still works but warns and names
+        ``waterdata.parallel_chunks``, the one place the OGC adapters expose it
+        (ADR 0010: a top-level name implies every adapter honours it, and the
+        non-OGC adapters silently ignore it)."""
         import dataretrieval
         from dataretrieval import waterdata
+        from dataretrieval._deprecation import REMOVALS
         from dataretrieval.ogc import chunking
 
-        assert dataretrieval.parallel_chunks is chunking.parallel_chunks
+        assert "parallel_chunks" not in dataretrieval.__all__
         assert waterdata.parallel_chunks is chunking.parallel_chunks
-        assert "parallel_chunks" in dataretrieval.__all__
         assert "parallel_chunks" in waterdata.__all__
+
+        with pytest.warns(DeprecationWarning) as caught:
+            top_level = dataretrieval.parallel_chunks
+        assert top_level is chunking.parallel_chunks
+        message = str(caught[0].message)
+        assert "`dataretrieval.parallel_chunks` is deprecated" in message
+        assert "`dataretrieval.waterdata.parallel_chunks`" in message
+        assert REMOVALS["parallel_chunks"] in message
+        assert caught[0].filename == __file__
 
 
 class Test_BaseMetadata:

@@ -42,12 +42,12 @@ BLOCK_ONLY_SETTINGS: tuple[str, ...] = ("base_url",)
 #:
 #: Not every setting has one. ``parallel_chunks`` is deliberately absent: it splits a
 #: query into more sub-requests, each of which spends rate-limit quota, and
-#: ``dataretrieval.parallel_chunks`` documents why that must stay a deliberate choice
-#: rather than a process-wide default. An environment variable is process-wide and
-#: implicit -- exported once in a shell profile, inherited by every subprocess,
-#: invisible at the call site. A config-file entry is written deliberately and appears
-#: in :func:`show_configuration`, so the file and :func:`configure` block are the only
-#: sources for it.
+#: ``dataretrieval.waterdata.parallel_chunks`` documents why that must stay a
+#: deliberate choice rather than a process-wide default. An environment variable
+#: is process-wide and implicit -- exported once in a shell profile, inherited by
+#: every subprocess, invisible at the call site. A config-file entry is written
+#: deliberately and appears in :func:`show_configuration`, so the file and
+#: :func:`configure` block are the only sources for it.
 ENV_VARS: dict[str, str] = {
     "api_key": "API_USGS_PAT",
     "concurrency": "API_USGS_CONCURRENT",
@@ -92,7 +92,7 @@ _WARN_AT_TOP_LEVEL: dict[str, str] = {
     "parallel_chunks": (
         f"'parallel_chunks' at {_TOP_LEVEL} applies to every query in every "
         "process and spends rate-limit quota. Prefer a [<adapter>.<name>] "
-        "table selected per run, or the dataretrieval.parallel_chunks(n) "
+        "table selected per run, or the waterdata.parallel_chunks(n) "
         "block for a single call."
     ),
 }
@@ -463,7 +463,7 @@ class Configuration(BaseConfiguration):
     parallel_chunks : int, optional
         Default optional fan-out for multi-value queries. It limits extra
         refinement, but URL-byte safety may already require more sub-requests.
-        Sets the baseline that :func:`dataretrieval.parallel_chunks` overrides
+        Sets the baseline that :func:`dataretrieval.waterdata.parallel_chunks` overrides
         per call. Each sub-request spends rate-limit quota, so raise it only
         for pulls you know are large.
     stall_timeout : float, optional

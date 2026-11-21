@@ -593,7 +593,7 @@ def parallel_chunks(*, adapter: str | None = None) -> int:
 
     ``1`` (the default) chunks only as far as the URL byte limit forces. This is the
     *baseline*;
-    :func:`dataretrieval.parallel_chunks` overrides it for one call. Shares
+    :func:`dataretrieval.waterdata.parallel_chunks` overrides it for one call. Shares
     the name of that context manager because it is the same setting -- this
     is the resolved value, not the scoping block.
     """

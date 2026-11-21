@@ -18,6 +18,7 @@ REMOVALS: dict[str, str] = {
     "waterdata.get_cql(service=)": "2027-08-09",
     "wateruse": "2027-08-11",
     "ogc.interruptions": "2027-08-25",
+    "parallel_chunks": "2027-11-21",
     # Set by the service, not by this package: v0 of the collection serves these
     # filters until June 2027, and the shim stops working when that endpoint is
     # retired (https://waterdata.usgs.gov/blog/api-v1-release/).
