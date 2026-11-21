@@ -50,7 +50,11 @@ from dataretrieval.ogc.requests import (
     _switch_arg_id,
     _switch_properties_id,
 )
-from dataretrieval.ogc.shaping import GEOPANDAS, _finalize_ogc, _get_resp_data
+from dataretrieval.ogc.shaping import (
+    _finalize_ogc,
+    _get_resp_data,
+    _wants_geodataframe,
+)
 from dataretrieval.transport.fanout import FanOut
 from dataretrieval.transport.links import resolve_next_url
 from dataretrieval.transport.pagination import paginate
@@ -313,7 +317,7 @@ def get_ogc_data(
     # the all-empty finalizer receive these same values, so frame type never
     # depends on whether a particular page includes geometry.
     include_geometry = spatial and not bool(args.get("skip_geometry", False))
-    geopd = GEOPANDAS and include_geometry
+    geopd = _wants_geodataframe(include_geometry)
 
     # Post-processing is injected into the chunker rather than applied here,
     # so it runs on every exit: the normal return and a later

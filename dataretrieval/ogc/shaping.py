@@ -35,12 +35,29 @@ logger = logging.getLogger(__name__)
 # spatial joins fail). Matches the constant in ``nldi`` (EPSG:4326).
 _CRS = "EPSG:4326"
 
-# Whether geopandas is present is a static, environment-level fact, so warn
-# once here at import time rather than per query/chunk.
-if not GEOPANDAS:
-    logger.warning(
-        "Geopandas not installed. Geometries will be flattened into pandas DataFrames."
-    )
+# Whether geopandas is present is a static, environment-level fact, so the notice
+# that geometries are flattened is logged once per process, at the first request
+# that would have produced a GeoDataFrame. Logging it at import time reached
+# stderr for every ``import dataretrieval``, including for users who never
+# request geometry.
+_notice_logged = False
+
+
+def _wants_geodataframe(include_geometry: bool = True) -> bool:
+    """Return whether a request should build GeoDataFrames.
+
+    True when geopandas is installed and the request includes geometry. When the
+    request wants geometry but geopandas is missing, log the one-time notice that
+    geometries are flattened into pandas DataFrames.
+    """
+    global _notice_logged
+    if include_geometry and not GEOPANDAS and not _notice_logged:
+        _notice_logged = True
+        logger.warning(
+            "Geopandas not installed. "
+            "Geometries will be flattened into pandas DataFrames."
+        )
+    return GEOPANDAS and include_geometry
 
 
 def _empty_feature_frame(

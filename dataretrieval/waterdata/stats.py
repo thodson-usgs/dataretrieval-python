@@ -20,10 +20,10 @@ import pandas as pd
 from dataretrieval._response_metadata import BaseMetadata
 from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.ogc.shaping import (
-    GEOPANDAS,
     _attach_coordinates,
     _empty_feature_frame,
     _geo_feature_frame,
+    _wants_geodataframe,
 )
 from dataretrieval.transport.http import default_headers
 from dataretrieval.transport.pagination import run_paginated
@@ -109,8 +109,8 @@ def _extract_features(body: dict[str, Any] | None) -> list[dict[str, Any]] | Non
 def _build_outer_frame(features: list[dict[str, Any]], geopd: bool) -> pd.DataFrame:
     """Build the outer (per-monitoring-location) frame from GeoJSON features.
 
-    The geopd-missing warning is emitted once at import (see engine module);
-    doing it here would log per page.
+    The geopd-missing notice is logged once per process by
+    ``_wants_geodataframe``; logging it here would repeat it per page.
     """
     if not geopd:
         outer_props = [
@@ -268,7 +268,8 @@ def get_data(
         # Coerce falsy cursors ("", 0) to None so _paginate terminates.
         # USGS uses "next": null on the last page, but the coercion
         # also covers any "" sentinel a future schema might use.
-        return _handle_nesting(body, geopd=GEOPANDAS), body.get("next") or None
+        frame = _handle_nesting(body, geopd=_wants_geodataframe())
+        return frame, body.get("next") or None
 
     async def follow_up(cursor: str, sess: httpx.AsyncClient) -> httpx.Response:
         # Build a new params dict per page so the caller's ``args``
