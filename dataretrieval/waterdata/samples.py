@@ -22,7 +22,6 @@ from dataretrieval._querying import to_str
 from dataretrieval._response_metadata import BaseMetadata
 from dataretrieval._validation import require_one_of
 from dataretrieval._wqx import _attach_datetime_columns
-from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.transport.http import (
     HTTPX_DEFAULTS,
 )
@@ -32,6 +31,7 @@ from dataretrieval.transport.http import (
 from dataretrieval.transport.http import (
     get as _get,
 )
+from dataretrieval.transport.status import raise_for_non_200
 from dataretrieval.waterdata.endpoints import samples_url
 from dataretrieval.waterdata.types import (
     CODE_SERVICES,
@@ -70,7 +70,7 @@ def get_codes(code_service: CODE_SERVICES) -> tuple[pd.DataFrame, BaseMetadata]:
 
     response = _get(url, headers=_default_headers(url), **HTTPX_DEFAULTS)
 
-    _raise_for_non_200(response)
+    raise_for_non_200(response)
 
     data_dict = json.loads(response.text)
     data_list = data_dict["data"]
@@ -99,7 +99,7 @@ def _get_samples_csv(
         headers=_default_headers(url),
         **HTTPX_DEFAULTS,
     )
-    _raise_for_non_200(response)
+    raise_for_non_200(response)
     df = read_code_csv(response.text)
     return df, response
 

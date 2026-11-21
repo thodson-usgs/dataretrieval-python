@@ -6,7 +6,7 @@ pagination and sync dispatch are in :mod:`dataretrieval.transport`; request
 construction is in :mod:`~dataretrieval.ogc.requests`. The surrounding
 concerns are in sibling modules this one composes, each with its own reason
 to change: :mod:`~dataretrieval.ogc.dates` (time-parameter marshalling),
-:mod:`~dataretrieval.ogc.errors` (HTTP error mapping), and
+:mod:`~dataretrieval.transport.status` (HTTP error mapping), and
 :mod:`~dataretrieval.ogc.shaping` (GeoJSON features to DataFrame and result
 finalization). It is deliberately free of any Water-Data-specific constants
 so a sibling package (e.g. NGWMN) can use it without importing
@@ -35,7 +35,6 @@ import httpx
 import pandas as pd
 
 import dataretrieval.ogc.chunking as chunking
-from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.ogc.policy import (
     DEFAULT_DIALECT,
     OgcDialect,
@@ -55,6 +54,7 @@ from dataretrieval.transport.fanout import FanOut
 from dataretrieval.transport.links import resolve_next_url
 from dataretrieval.transport.pagination import paginate
 from dataretrieval.transport.retry import RetryPolicy
+from dataretrieval.transport.status import raise_for_non_200
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
@@ -209,7 +209,7 @@ async def _walk_pages(
         ),
         follow_up=follow_up,
         client=client,
-        raise_for_status=_raise_for_non_200,
+        raise_for_status=raise_for_non_200,
         row_cap=row_cap,
     )
 

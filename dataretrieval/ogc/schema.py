@@ -14,10 +14,10 @@ import pandas as pd
 
 from dataretrieval._response_metadata import BaseMetadata
 from dataretrieval._validation import require_one_of
-from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.transport.http import HTTPX_DEFAULTS
 from dataretrieval.transport.http import default_headers as _default_headers
 from dataretrieval.transport.http import get as _get
+from dataretrieval.transport.status import raise_for_non_200
 
 
 def _check_ogc_requests(
@@ -31,7 +31,7 @@ def _check_ogc_requests(
     require_one_of(req_type, ("queryables", "schema"), name="req_type")
     url = f"{base_url}/collections/{endpoint}/{req_type}"
     response = _get(url, headers=_default_headers(url), **HTTPX_DEFAULTS)
-    _raise_for_non_200(response)
+    raise_for_non_200(response)
     return cast("dict[str, Any]", response.json()), response
 
 

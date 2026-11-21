@@ -1,9 +1,11 @@
-"""HTTP error mapping for the OGC engine.
+"""HTTP status mapping shared by every USGS service adapter.
 
-Translates a non-200 OGC response into the typed ``DataRetrievalError``
-taxonomy (USGS-API-aware: special 429/403 messages, JSON error envelopes, and
-``Retry-After`` parsing) and builds the user-facing message for a
-mid-pagination failure. Changes here track the API's error contract.
+Translates a non-200 response into the typed ``DataRetrievalError`` taxonomy
+(USGS-API-aware: special 429/403 messages, JSON error envelopes, and
+``Retry-After`` parsing). OGC collections, the Water Data samples and statistics
+endpoints, and the ratings STAC walk all report failures through it, so it
+belongs to transport rather than to the OGC subsystem (ADR 0006). Changes here
+track the API's error contract.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ def _error_body(resp: httpx.Response) -> str:
           ``"<status>: <reason>."``, except **403**, which falls back to
           :data:`_FORBIDDEN_CAUSES` so a credential problem is named.
 
-    :func:`_raise_for_non_200` appends ``" (URL: ...)"`` to whatever this
+    :func:`raise_for_non_200` appends ``" (URL: ...)"`` to whatever this
     returns.
     """
     status = resp.status_code
@@ -107,7 +109,7 @@ def _url_suffix(resp: httpx.Response) -> str:
         return ""
 
 
-def _raise_for_non_200(resp: httpx.Response) -> None:
+def raise_for_non_200(resp: httpx.Response) -> None:
     """
     Raise a typed exception for any non-200 response.
 

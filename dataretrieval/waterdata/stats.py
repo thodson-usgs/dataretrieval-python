@@ -18,7 +18,6 @@ import httpx
 import pandas as pd
 
 from dataretrieval._response_metadata import BaseMetadata
-from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.ogc.shaping import (
     GEOPANDAS,
     _attach_coordinates,
@@ -27,6 +26,7 @@ from dataretrieval.ogc.shaping import (
 )
 from dataretrieval.transport.http import default_headers
 from dataretrieval.transport.pagination import run_paginated
+from dataretrieval.transport.status import raise_for_non_200
 from dataretrieval.waterdata.endpoints import statistics_api_url
 
 __all__ = ["get_data"]
@@ -281,7 +281,7 @@ def get_data(
         [req],
         parse_response=parse_response,
         follow_up=follow_up,
-        raise_for_status=_raise_for_non_200,
+        raise_for_status=raise_for_non_200,
         client=client,
         service=service,
         adapter="waterdata",

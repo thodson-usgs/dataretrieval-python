@@ -138,7 +138,7 @@ class TestDefaultHeadersHostScoping:
         client.get.return_value = mock.Mock(text="rating body")
         with (
             mock.patch.object(ratings, "active_client", return_value=client),
-            mock.patch.object(ratings, "_raise_for_non_200"),
+            mock.patch.object(ratings, "raise_for_non_200"),
             mock.patch.object(ratings, "read_rdb", return_value=pd.DataFrame()),
             mock.patch.object(ratings, "extract_rdb_comment", return_value=""),
         ):

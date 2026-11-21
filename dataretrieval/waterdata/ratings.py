@@ -21,7 +21,6 @@ import pandas as pd
 from dataretrieval._validation import render_options
 from dataretrieval.exceptions import DataRetrievalError, SkippedRatingWarning
 from dataretrieval.ogc.dates import _DURATION_RE, _coerce_to_list, _format_api_dates
-from dataretrieval.ogc.errors import _raise_for_non_200
 from dataretrieval.ogc.filters import _cql_in_clause
 from dataretrieval.ogc.requests import _check_monitoring_location_id
 from dataretrieval.rdb import extract_rdb_comment, read_rdb
@@ -32,6 +31,7 @@ from dataretrieval.transport.http import (
 from dataretrieval.transport.links import resolve_next_url
 from dataretrieval.transport.pagination import run_paginated
 from dataretrieval.transport.retry import RetryPolicy
+from dataretrieval.transport.status import raise_for_non_200
 from dataretrieval.waterdata.endpoints import ratings_catalog_url
 
 __all__ = ["get_ratings"]
@@ -324,7 +324,7 @@ def _search(
         [req],
         parse_response=parse_response,
         follow_up=follow_up,
-        raise_for_status=_raise_for_non_200,
+        raise_for_status=raise_for_non_200,
         client_options={"verify": ssl_check},
         service="ratings",
         adapter="waterdata",
@@ -382,7 +382,7 @@ async def _fetch_rating(
     if session is None:
         raise RuntimeError("_fetch_rating must run inside a FanOut run.")
     response = await session.get(href, headers=headers)
-    _raise_for_non_200(response)
+    raise_for_non_200(response)
 
     if file_path is not None:
         await anyio.to_thread.run_sync(

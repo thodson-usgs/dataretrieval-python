@@ -27,11 +27,6 @@ from dataretrieval.ogc.engine import (
     _next_req_url,
     _walk_pages,
 )
-from dataretrieval.ogc.errors import (
-    _error_body,
-    _parse_retry_after,
-    _raise_for_non_200,
-)
 from dataretrieval.ogc.policy import OgcDialect
 from dataretrieval.ogc.schema import _check_ogc_requests
 from dataretrieval.ogc.shaping import (
@@ -42,6 +37,11 @@ from dataretrieval.ogc.shaping import (
     _type_cols,
 )
 from dataretrieval.ogc.shaping import _finalize_ogc as _ogc_finalize
+from dataretrieval.transport.status import (
+    _error_body,
+    _parse_retry_after,
+    raise_for_non_200,
+)
 from dataretrieval.waterdata import get_stats_date_range, get_stats_por
 from dataretrieval.waterdata.stats import _handle_nesting, get_data
 from dataretrieval.waterdata.utils import (
@@ -1393,7 +1393,7 @@ def test_raise_for_non_200_raises_service_unavailable_for_5xx():
     resp = _make_response(503, "", reason="Service Unavailable")
     resp.headers["Retry-After"] = "120"
     with pytest.raises(ServiceUnavailable) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     assert excinfo.value.retry_after == 120.0
 
 
@@ -1404,7 +1404,7 @@ def test_raise_for_non_200_attaches_retry_after_to_rate_limited():
     resp = _make_response(429, "", reason="Too Many Requests")
     resp.headers["Retry-After"] = "60"
     with pytest.raises(RateLimited) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     assert excinfo.value.retry_after == 60.0
 
 
@@ -1422,7 +1422,7 @@ def test_403_reports_the_services_own_reason():
         content_type="application/json",
     )
     with pytest.raises(HTTPError) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     assert "API key revoked" in str(excinfo.value)
 
 
@@ -1460,7 +1460,7 @@ def test_403_with_a_gateway_json_message_shows_the_message(body, expected):
         content_type="application/json",
     )
     with pytest.raises(HTTPError) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     message = str(excinfo.value)
     assert message == expected
     assert "{" not in message
@@ -1471,7 +1471,7 @@ def test_403_with_a_non_json_body_shows_it_like_any_other_status():
     403 shares the snippet path rather than having its own."""
     resp = _make_response(403, "Access Denied: API key revoked", reason="Forbidden")
     with pytest.raises(HTTPError) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     assert "API key revoked" in str(excinfo.value)
 
 
@@ -1479,7 +1479,7 @@ def test_403_without_an_envelope_names_the_credential_cause():
     """With no body to quote, both plausible causes are offered."""
     resp = _make_response(403, "", reason="Forbidden")
     with pytest.raises(HTTPError) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     message = str(excinfo.value)
     assert "API_USGS_PAT" in message and "server limits" in message
 
@@ -1490,14 +1490,14 @@ def test_error_messages_name_the_url():
     request = httpx.Request("GET", "https://api.waterdata.usgs.gov/ogcapi/v1/x")
     resp = httpx.Response(400, content=b"", request=request)
     with pytest.raises(HTTPError) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     assert "https://api.waterdata.usgs.gov/ogcapi/v1/x" in str(excinfo.value)
 
 
 def test_error_message_survives_a_response_with_no_request():
     """An error path must not fail while reporting a failure."""
     with pytest.raises(HTTPError):
-        _raise_for_non_200(_make_response(400, "", reason="Bad Request"))
+        raise_for_non_200(_make_response(400, "", reason="Bad Request"))
 
 
 def test_raise_for_non_200_400_raises_http_error():
@@ -1511,7 +1511,7 @@ def test_raise_for_non_200_400_raises_http_error():
         content_type="application/json",
     )
     with pytest.raises(HTTPError) as excinfo:
-        _raise_for_non_200(resp)
+        raise_for_non_200(resp)
     assert excinfo.value.status_code == 400
     # Fatal, not transient: the chunker uses ``isinstance(_, TransientError)``
     # to decide whether to wrap a failure as a resumable ChunkInterrupted.
@@ -1564,7 +1564,7 @@ def test_next_req_url_strips_embedded_credentials():
 
 
 def test_check_ogc_requests_raises_typed_on_5xx(httpx_mock):
-    """``_check_ogc_requests`` routes a non-200 through ``_raise_for_non_200``,
+    """``_check_ogc_requests`` routes a non-200 through ``raise_for_non_200``,
     so a 5xx is raised as the typed ``ServiceUnavailable`` — the same typed
     contract as the main data path, not a raw ``httpx`` error."""
     httpx_mock.add_response(
@@ -1813,14 +1813,14 @@ class TestOgcJsonErrorDetail:
     building an error."""
 
     def test_a_non_json_body_yields_no_detail(self):
-        from dataretrieval.ogc.errors import _json_error_detail
+        from dataretrieval.transport.status import _json_error_detail
 
         resp = httpx.Response(400, text="<html>gateway</html>")
         assert _json_error_detail(resp) is None
 
     def test_a_json_scalar_body_yields_no_detail(self):
         """A bare string or list is valid JSON but has no error envelope."""
-        from dataretrieval.ogc.errors import _json_error_detail
+        from dataretrieval.transport.status import _json_error_detail
 
         assert _json_error_detail(httpx.Response(400, json="just a string")) is None
         assert _json_error_detail(httpx.Response(400, json=[1, 2, 3])) is None
