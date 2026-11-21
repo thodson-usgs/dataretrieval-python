@@ -128,8 +128,8 @@ def get_ratings(
     FanOutInterrupted
         A transient failure (429 / 5xx / timeout) was not resolved by the built-in
         retries during the search or a download. ``exc.call.resume()`` finishes the
-        interrupted stage (see :doc:`/userguide/errors`); the assembled per-feature dict
-        is returned by a new ``get_ratings`` call.
+        interrupted stage (see :doc:`/userguide/errors`) and returns the same
+        per-feature dict an uninterrupted call would.
 
     Warns
     -----
@@ -417,12 +417,14 @@ def _download_all(
     pass through unchanged so the executor can classify and retry them.
 
     The public result is a dict keyed by feature id, so the fetch closure
-    accumulates it; the executor's combined frame is not the return shape and
-    is discarded. Both outcomes return to the executor a body-less
-    :func:`_inert_response` -- a skip so the item counts as complete (a later
-    ``resume()`` continues past it rather than re-attempting), a success so
-    the run does not hold every downloaded file in memory while keeping the
-    response's status and quota headers for aggregation.
+    accumulates it and ``finalize`` returns it: the executor's combined frame
+    is not the return shape, and a resumed call (``exc.call.resume()``) must
+    return what an uninterrupted one would (ADR 0008). Both outcomes return to
+    the executor a body-less :func:`_inert_response` -- a skip so the item counts
+    as complete (a later ``resume()`` continues past it rather than
+    re-attempting), a success so the run does not hold every downloaded file in
+    memory while keeping the response's status and quota headers for
+    aggregation.
     """
     out: dict[str, pd.DataFrame] = {}
     if not features:
@@ -449,10 +451,16 @@ def _download_all(
             response.status_code, str(response.url), response.headers
         )
 
-    FanOut(
+    def finalize(
+        _frame: pd.DataFrame, _response: httpx.Response
+    ) -> dict[str, pd.DataFrame]:
+        return out
+
+    result: dict[str, pd.DataFrame] = FanOut(
         features,
         fetch,
         RetryPolicy.from_configuration(adapter="waterdata"),
+        finalize,
         client_options={"verify": ssl_check},
         # No single URL expresses "all of these assets" -- the aggregate
         # reports the first, matching what a single-feature call would show.
@@ -460,4 +468,4 @@ def _download_all(
         service="ratings",
         adapter="waterdata",
     ).resume()
-    return out
+    return result

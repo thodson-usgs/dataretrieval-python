@@ -153,15 +153,15 @@ _Fetch = Callable[[_Chunk], Awaitable[tuple[pd.DataFrame, httpx.Response]]]
 
 # Caller-supplied transform applied to the combined result, so a resumed call
 # returns the same shape as an un-interrupted one rather than the executor's raw
-# ``(frame, httpx.Response)``. This keeps the executor generic: the OGC getters
-# inject their post-processing (type coercion, column arrangement,
-# ``BaseMetadata``) through ``_finalize_ogc``. The default is identity.
-_Finalize = Callable[[pd.DataFrame, httpx.Response], tuple[pd.DataFrame, Any]]
+# ``(frame, httpx.Response)``. The result is whatever shape the getter returns (a
+# ``(frame, metadata)`` pair for most, a ``dict`` for ``get_ratings``), so the
+# executor is typed ``Any`` and each caller narrows it. This keeps the executor
+# generic: the OGC getters inject their post-processing (type coercion, column
+# arrangement, ``BaseMetadata``) through ``_finalize_ogc``. The default is identity.
+_Finalize = Callable[[pd.DataFrame, httpx.Response], Any]
 
 
-def _passthrough_result(
-    frame: pd.DataFrame, response: httpx.Response
-) -> tuple[pd.DataFrame, Any]:
+def _passthrough_result(frame: pd.DataFrame, response: httpx.Response) -> Any:
     """Default :data:`_Finalize`: return the raw combined pair unchanged."""
     return frame, response
 
@@ -423,7 +423,7 @@ class FanOut(Generic[_Chunk]):
             if index not in self._chunks:
                 yield index, item
 
-    def resume(self) -> tuple[pd.DataFrame, Any]:
+    def resume(self) -> Any:
         """
         Run the call to completion and return the combined result.
 
@@ -454,7 +454,9 @@ class FanOut(Generic[_Chunk]):
             (canonical URL, headers from the response with the lowest reported
             remaining quota, and summed response elapsed durations) by default,
             or whatever :attr:`finalize` produces (e.g. ``BaseMetadata`` for
-            the OGC getters).
+            the OGC getters). When :attr:`finalize` returns something other
+            than a pair (``get_ratings`` returns a ``dict``), that object is
+            returned whole and the two names above do not apply.
 
         Raises
         ------
@@ -490,7 +492,7 @@ class FanOut(Generic[_Chunk]):
                 # ``portal.call`` returns ``Any`` because ``functools.partial``
                 # erases ``_run``'s return type; restore the declared tuple.
                 return cast(
-                    "tuple[pd.DataFrame, Any]",
+                    "Any",
                     portal.call(functools.partial(self._run, concurrency)),
                 )
 
@@ -539,7 +541,7 @@ class FanOut(Generic[_Chunk]):
             raise self._normalize_failure(first_transient)
         raise interrupted from first_transient
 
-    async def _run(self, max_concurrent: int | None) -> tuple[pd.DataFrame, Any]:
+    async def _run(self, max_concurrent: int | None) -> Any:
         """
         Gather every pending chunk over one shared
         :class:`httpx.AsyncClient` and return the combined, finalized result.

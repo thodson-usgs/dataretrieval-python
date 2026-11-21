@@ -355,7 +355,7 @@ def get_ogc_data(
         # resumable-interruption semantics as the chunked path — and the same
         # ``finalize``, so a later ``exc.call.resume()`` returns the finished
         # ``(df, BaseMetadata)`` shape rather than a raw response pair.
-        return FanOut(
+        result: tuple[pd.DataFrame, BaseMetadata] = FanOut(
             [req],
             functools.partial(
                 _walk_pages,
@@ -369,6 +369,7 @@ def get_ogc_data(
             service=collection,
             adapter=adapter,
         ).resume()
+        return result
 
     # Bind the API target and quirks into the request builder and fetcher the
     # same way ``finalize`` binds its own state: with ``functools.partial``.

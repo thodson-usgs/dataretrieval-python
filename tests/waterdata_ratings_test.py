@@ -385,8 +385,8 @@ def test_get_ratings_download_429_is_resumable_not_skipped(httpx_mock):
         with pytest.raises(QuotaExhausted) as excinfo:
             get_ratings(monitoring_location_id="USGS-01104475")
 
-        df, _ = excinfo.value.call.resume()
-    assert len(df) == 3
+        ratings = excinfo.value.call.resume()
+    assert len(ratings["USGS-01104475.exsa.rdb"]) == 3
 
 
 def test_stac_next_link_refuses_another_host(httpx_mock):
@@ -438,3 +438,42 @@ def test_stac_next_link_strips_embedded_credentials(httpx_mock):
     followed = httpx_mock.get_requests()[1]
     assert followed.url.userinfo == b""
     assert followed.headers.get("Authorization") is None
+
+
+def test_get_ratings_resume_returns_the_getters_shape(httpx_mock):
+    """ADR 0008: a resumed call returns what an uninterrupted one would. The
+    result is a ``dict`` keyed by feature id, not the executor's raw
+    ``(DataFrame, Response)`` pair."""
+    ids = ["USGS-01104475.exsa.rdb", "USGS-01104476.exsa.rdb"]
+    hrefs = [_GOOD_ASSET, _GOOD_ASSET.replace("01104475", "01104476")]
+    search = {
+        "features": [
+            {
+                "id": fid,
+                "properties": {"file_type": "exsa"},
+                "assets": {"data": {"href": href}},
+            }
+            for fid, href in zip(ids, hrefs, strict=True)
+        ]
+    }
+    sites = ["USGS-01104475", "USGS-01104476"]
+
+    def stub(second_is_429):
+        httpx_mock.add_response(method="GET", url=STAC_SEARCH_RE, json=search)
+        httpx_mock.add_response(method="GET", url=hrefs[0], text=_SAMPLE_RDB)
+        if second_is_429:
+            httpx_mock.add_response(method="GET", url=hrefs[1], status_code=429)
+        httpx_mock.add_response(method="GET", url=hrefs[1], text=_SAMPLE_RDB)
+
+    stub(second_is_429=False)
+    expected = get_ratings(monitoring_location_id=sites)
+
+    stub(second_is_429=True)
+    with pytest.raises(QuotaExhausted) as excinfo:
+        get_ratings(monitoring_location_id=sites)
+    resumed = excinfo.value.call.resume()
+
+    assert isinstance(resumed, dict)
+    assert resumed.keys() == expected.keys() == set(ids)
+    for fid in ids:
+        pd.testing.assert_frame_equal(resumed[fid], expected[fid])

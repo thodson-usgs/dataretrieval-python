@@ -199,7 +199,7 @@ def run_paginated(
 
     if canonical_url is None and requests:
         canonical_url = str(requests[0].url)
-    return FanOut(
+    result: tuple[pd.DataFrame, Any] = FanOut(
         requests,
         fetch,
         RetryPolicy.from_configuration(adapter=adapter),
@@ -210,3 +210,4 @@ def run_paginated(
         service=service,
         adapter=adapter,
     ).resume()
+    return result

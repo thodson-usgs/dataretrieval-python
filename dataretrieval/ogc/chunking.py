@@ -248,7 +248,7 @@ def multi_value_chunked(
             # The concurrency cap is resolved inside ``resume()`` through the
             # configuration chain; ``1`` is a sequential gather,
             # ``total <= 1`` a one-element gather — no special branch.
-            return ChunkedCall(
+            result: tuple[pd.DataFrame, Any] = ChunkedCall(
                 plan,
                 fetch,
                 retry_policy,
@@ -259,6 +259,7 @@ def multi_value_chunked(
                 service=args.get("collection"),
                 adapter=adapter,
             ).resume()
+            return result
 
         return wrapper
 
