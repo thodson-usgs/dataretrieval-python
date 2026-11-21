@@ -632,7 +632,24 @@ class FanOut(Generic[_Chunk]):
                 )
                 self._handle_gather_failures(results)
 
-        return self.finalize(*self._combine_raw())
+        return await self._finalize_resumably()
+
+    async def _finalize_resumably(self) -> tuple[pd.DataFrame, Any]:
+        """Run :attr:`finalize` off the event loop, keeping a transient resumable.
+
+        ``finalize`` may issue a blocking request (an OGC getter fetches the
+        collection schema for an empty result), so it runs in a worker thread
+        rather than stalling the loop. Every chunk has completed by now, so a
+        transient failure here is wrapped like a chunk failure: ``.call.resume()``
+        re-runs only this step.
+        """
+        try:
+            return await asyncio.to_thread(self.finalize, *self._combine_raw())
+        except Exception as exc:
+            interrupted = self.wrap_failure(exc)
+            if interrupted is None:
+                raise
+            raise interrupted from exc
 
 
 __all__ = [
