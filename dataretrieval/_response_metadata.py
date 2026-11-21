@@ -14,6 +14,16 @@ from typing import Any
 import httpx
 
 
+class _NoSiteInfoError(AttributeError, NotImplementedError):
+    """``site_info`` read on metadata that has none.
+
+    An ``AttributeError`` so ``hasattr``, ``getattr(..., default)`` and
+    tab-completion treat the attribute as absent instead of raising. Also a
+    ``NotImplementedError`` because that is what ``BaseMetadata.site_info``
+    raised before, and the class is public as ``utils.BaseMetadata``.
+    """
+
+
 class BaseMetadata:
     """Base class for metadata.
 
@@ -46,13 +56,11 @@ class BaseMetadata:
 
     @property
     def site_info(self) -> Any:
-        raise NotImplementedError(
+        raise _NoSiteInfoError(
             "This metadata object has no site_info: the getter that produced "
-            "this result does not return site descriptions alongside data. Fetch "
-            "them using a separate function from the same adapter -- "
-            "dataretrieval.waterdata.get_monitoring_locations("
-            "monitoring_location_id=...) for Water Data, "
-            "dataretrieval.ngwmn.get_sites(...) for NGWMN."
+            "this result does not return site descriptions alongside data. "
+            "Call the getter in the same module that returns sites or "
+            "monitoring locations to fetch them."
         )
 
     def __repr__(self) -> str:

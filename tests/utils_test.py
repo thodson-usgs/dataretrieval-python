@@ -310,6 +310,21 @@ class Test_BaseMetadata:
         with pytest.raises(NotImplementedError):
             _ = md.site_info
 
+    def test_site_info_absent_is_an_attribute_error(self):
+        """``hasattr`` only swallows AttributeError, so an unsupported
+        ``site_info`` must be one (and stay a NotImplementedError for callers
+        that catch that), with a message that names no particular service."""
+        md = utils.BaseMetadata(mock.MagicMock())
+
+        assert not hasattr(md, "site_info")
+        assert getattr(md, "site_info", "default") == "default"
+        assert "site_info" not in [n for n in dir(md) if hasattr(md, n)]
+        with pytest.raises(AttributeError, match="site_info") as excinfo:
+            _ = md.site_info
+        message = str(excinfo.value)
+        for service in ("waterdata", "ngwmn", "wqp", "nldi", "nwdc"):
+            assert service not in message
+
     def test_pickle_keeps_historical_import_path(self):
         """New pickles remain readable by releases predating the class move."""
         import pickle
