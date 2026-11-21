@@ -1,4 +1,5 @@
 import datetime
+import warnings
 from unittest import mock
 
 import pytest
@@ -443,4 +444,49 @@ def test_wqp_metadata_site_info_routes_to_what_sites(monkeypatch):
 
     monkeypatch.setattr(wqp_mod, "what_sites", fake_what_sites)
     assert _wqp_metadata(siteid="USGS-05427718").site_info == "SENTINEL"
-    assert captured == {"siteid": "USGS-05427718"}
+    assert captured == {
+        "siteid": "USGS-05427718",
+        "legacy": True,
+        "ssl_check": True,
+    }
+
+
+def test_site_info_reuses_the_original_call_profile(httpx_mock):
+    """``site_info`` repeats the lookup with the original call's ``legacy``
+    and ``ssl_check``, so a WQX3.0 query is not answered by the legacy
+    Station service (and does not warn about it)."""
+    with open("tests/data/wqp3_results.txt", encoding="utf-8") as text:
+        httpx_mock.add_response(method="GET", text=text.read())
+    with open("tests/data/wqp_sites.txt", encoding="utf-8") as text:
+        httpx_mock.add_response(method="GET", text=text.read())
+
+    _, md = get_results(
+        legacy=False, ssl_check=False, siteid="WIDNR_WQX-10032762", dataProfile="narrow"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DataCurrencyWarning)
+        sites, _ = md.site_info
+
+    assert isinstance(sites, DataFrame)
+    sent = httpx_mock.get_requests()[-1].url
+    assert sent.path == "/wqx3/Station/search"
+    assert sent.params.get("siteid") == "WIDNR_WQX-10032762"
+
+
+def test_site_info_forwards_ssl_check(monkeypatch):
+    """The second request carries the first call's ``ssl_check``."""
+    seen = []
+
+    def fake_query(url, *, ssl_check, **_):
+        seen.append(ssl_check)
+        return mock.Mock(
+            text="MonitoringLocationIdentifier\nA\n",
+            url=url,
+            elapsed=datetime.timedelta(),
+            headers={},
+        )
+
+    monkeypatch.setattr(wqp, "_query_with_retry", fake_query)
+    _, md = what_sites(ssl_check=False, siteid="A")
+    assert md.site_info is not None
+    assert seen == [False, False]

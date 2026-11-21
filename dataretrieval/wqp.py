@@ -157,7 +157,7 @@ def _query_wqp(
     # activity-start sort, so the other collections keep their parsed shape.
     if service == "Result":
         df = _attach_datetime_columns(df)
-    return df, WQP_Metadata(response, **kwargs)
+    return df, WQP_Metadata(response, legacy=legacy, ssl_check=ssl_check, **kwargs)
 
 
 def get_results(
@@ -688,13 +688,28 @@ class WQP_Metadata(BaseMetadata):
         Site information (via ``what_sites``) if the query included a ``siteid``.
     """
 
-    def __init__(self, response: httpx.Response, **parameters: Any) -> None:
+    def __init__(
+        self,
+        response: httpx.Response,
+        *,
+        legacy: bool = True,
+        ssl_check: bool = True,
+        **parameters: Any,
+    ) -> None:
         """Generate the standard metadata set, plus WQP-specific metadata.
 
         Parameters
         ----------
         response : ``httpx.Response``
             Response object from the ``httpx`` module.
+
+        legacy : bool, optional
+            The ``legacy`` setting of the originating call, reused by
+            ``site_info``. Defaults to True.
+
+        ssl_check : bool, optional
+            The ``ssl_check`` setting of the originating call, reused by
+            ``site_info``. Defaults to True.
 
         parameters : dict
             Unpacked dictionary of the parameters supplied in the request.
@@ -703,6 +718,8 @@ class WQP_Metadata(BaseMetadata):
 
         super().__init__(response)
 
+        self._legacy = legacy
+        self._ssl_check = ssl_check
         self._parameters = parameters
 
     @property
@@ -712,6 +729,9 @@ class WQP_Metadata(BaseMetadata):
         Populated (via :func:`dataretrieval.wqp.what_sites`) when the query
         included a ``siteid`` (the WQP site identifier, e.g.
         ``"USGS-05586100"``); ``None`` otherwise.
+
+        Each access makes a new request, using the ``legacy`` and
+        ``ssl_check`` settings of the call that produced this metadata.
 
         Returns
         -------
@@ -723,7 +743,7 @@ class WQP_Metadata(BaseMetadata):
         siteid = self._parameters.get("siteid")
         if siteid is None:
             return None
-        return what_sites(siteid=siteid)
+        return what_sites(siteid=siteid, legacy=self._legacy, ssl_check=self._ssl_check)
 
 
 def _check_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
