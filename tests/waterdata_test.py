@@ -2104,3 +2104,24 @@ def test_a_list_value_with_an_apostrophe_folds_into_a_text_filter():
         monitoring_location_name=names, filter="agency_code = 'USGS'"
     )
     assert sorted(df["monitoring_location_name"]) == names
+
+
+@pytest.mark.parametrize(
+    "ids", [pd.Series(["AK001", "AK008"]), iter(["AK001", "AK008"])]
+)
+def test_get_reference_table_query_list_is_normalized_like_other_getters(
+    httpx_mock, ids
+):
+    """A list-like in ``query`` selects several values, as in any other getter.
+
+    ``query`` skipped the ``_get_args`` pass, so a ``Series`` or iterator reached
+    the request as its ``str()`` -- ``id=0    AK001\\n1    AK008...`` -- and
+    ``None`` entries were sent rather than dropped.
+    """
+    _mock_items(httpx_mock, "agency-codes")
+
+    get_reference_table("agency-codes", query={"id": ids, "skip": None})
+
+    requests = _items_requests(httpx_mock, "agency-codes")
+    assert _cql2_in(requests[0]) == {"id": ["AK001", "AK008"]}
+    assert "skip" not in str(requests[0].url) + requests[0].content.decode()

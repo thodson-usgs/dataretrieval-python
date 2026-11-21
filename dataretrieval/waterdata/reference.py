@@ -18,7 +18,7 @@ from dataretrieval.waterdata.endpoints import ogc_api_url
 from dataretrieval.waterdata.types import (
     METADATA_COLLECTIONS,
 )
-from dataretrieval.waterdata.utils import get_ogc_data
+from dataretrieval.waterdata.utils import _get_args, get_ogc_data
 
 if TYPE_CHECKING:
     from dataretrieval._response_metadata import BaseMetadata
@@ -51,7 +51,9 @@ def get_reference_table(
         number if your internet connection is unreliable.
     query: dictionary, optional
         A dictionary of extra query parameters to pass to the collection API
-        call.
+        call. Values are normalized as for the other getters: a list, tuple, or
+        ``pandas.Series`` of strings selects several values, and ``None`` is
+        dropped.
     max_rows : int, optional
         Cap the total number of rows returned, stopping pagination early
         instead of downloading the whole table. Useful for previewing
@@ -104,7 +106,7 @@ def get_reference_table(
     else:
         output_id = collection.removesuffix("s").replace("-", "_")
 
-    query_args = dict(query) if query else {}
+    query_args = _get_args(dict(query)) if query else {}
     if limit is not None:
         query_args["limit"] = limit
     return get_ogc_data(
