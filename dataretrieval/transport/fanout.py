@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import functools
 from collections.abc import Awaitable, Callable, Iterator
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 import httpx
@@ -66,7 +67,11 @@ from dataretrieval.interruptions import (
     _classify_chunk_error,
     _walk_causes,
 )
-from dataretrieval.transport.http import network_error, open_async_client
+from dataretrieval.transport.http import (
+    accepts_api_key,
+    network_error,
+    open_async_client,
+)
 from dataretrieval.transport.retry import _NO_RETRY, RetryPolicy
 from dataretrieval.transport.retry import retry_async as _retry
 
@@ -281,12 +286,19 @@ class FanOut(Generic[_Chunk]):
         # own would bypass the shared connection pool. Empty for OGC, which
         # exposes no such flag.
         self.client_options = client_options or {}
-        # No ambient state is snapshotted here: everything a chunk rebuild
-        # needs (base URL, dialect, row cap for the OGC getters) is closed
-        # over by the adapter's ``fetch``/plan, so a *later*
-        # ``exc.call.resume()`` — invoked after the originating call
-        # returned — rebuilds chunks against the values the call was
-        # created with without this executor holding adapter state.
+        # The credential is the one ambient setting snapshotted here. The adapters
+        # build request headers inside the chunk builder, so a resume run after the
+        # ``configure()`` block that made the call has exited would otherwise send a
+        # different key than the chunks that already ran. Everything else a rebuild
+        # needs (base URL, dialect, row cap) is closed over by the adapter's
+        # ``fetch``/plan. ``concurrency`` is deliberately *not* captured; see
+        # :meth:`resume` and ADR 0008. Read only when the call's host accepts the
+        # key, so a call that never carries one cannot fail on its configuration.
+        self._credential: _configuration.Configuration | None = (
+            _configuration.Configuration(api_key=_configuration.api_key())
+            if accepts_api_key(canonical_url)
+            else None
+        )
         # Completed (frame, response) pairs keyed by sub-args index; sparse
         # (gathered chunks complete out of order — see class docstring).
         # ``_run``'s ``track`` closure is the only writer, so ``dict`` insertion
@@ -471,10 +483,7 @@ class FanOut(Generic[_Chunk]):
         # line, which is what makes a resume long after the interruption
         # report progress. ``start_blocking_portal`` copies this
         # calling context into its worker thread, so the active reporter
-        # is visible to the chunks. Chunk-rebuild state (base URL, dialect, row
-        # cap) is held in the adapter's ``fetch`` closure, not in ambient
-        # state, so no construction-time snapshot is needed for a resume
-        # invoked after the originating call returned (see ``__init__``).
+        # is visible to the chunks.
         with _progress.progress_context(
             service=self.service, target_url=self.canonical_url
         ):
@@ -486,13 +495,22 @@ class FanOut(Generic[_Chunk]):
             concurrency = _configuration.concurrency(
                 self.default_concurrent, adapter=self.adapter
             )
-            with start_blocking_portal() as portal:
+            with (
+                self._credential_scope(),
+                start_blocking_portal() as portal,
+            ):
                 # ``portal.call`` returns ``Any`` because ``functools.partial``
                 # erases ``_run``'s return type; restore the declared tuple.
                 return cast(
                     "tuple[pd.DataFrame, Any]",
                     portal.call(functools.partial(self._run, concurrency)),
                 )
+
+    def _credential_scope(self) -> AbstractContextManager[None]:
+        """Re-apply the key this call was created with, over whatever is ambient now."""
+        if self._credential is None:
+            return nullcontext()
+        return _configuration.configure(self._credential)
 
     def _handle_gather_failures(
         self, results: list[tuple[pd.DataFrame, httpx.Response] | BaseException]

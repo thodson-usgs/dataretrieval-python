@@ -8,13 +8,15 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import numpy as np
 import pandas as pd
 import pytest
 from pandas import DataFrame
 
 import dataretrieval
-from dataretrieval import configuration
+from dataretrieval import configuration, waterdata
+from dataretrieval.configuration import Configuration
 from dataretrieval.ogc.policy import OgcDialect
 from dataretrieval.ogc.requests import (
     _check_monitoring_location_id,
@@ -2104,3 +2106,38 @@ def test_a_list_value_with_an_apostrophe_folds_into_a_text_filter():
         monitoring_location_name=names, filter="agency_code = 'USGS'"
     )
     assert sorted(df["monitoring_location_name"]) == names
+
+
+# --- resume keeps the credential the call was created under -------------------
+
+
+def test_resume_sends_the_key_the_call_was_created_with(httpx_mock):
+    """A chunk re-issued by ``exc.call.resume()`` carries the same key as the
+    chunks that ran before the interruption, not whatever key is ambient at resume.
+    """
+    sites = ["USGS-01", "USGS-02"]
+    keys_by_site: dict[str, list[str | None]] = {}
+    state = {"rate_limited": False}
+
+    def respond(request):
+        site = _filters(request)["monitoring_location_id"][0]
+        keys_by_site.setdefault(site, []).append(request.headers.get("X-Api-Key"))
+        if site == "USGS-02" and not state["rate_limited"]:
+            state["rate_limited"] = True
+            return httpx.Response(429, json={"detail": "rate limited"})
+        return httpx.Response(200, json=_fixture("daily"))
+
+    httpx_mock.add_callback(respond, method=None, url=_items_url("daily"))
+
+    with dataretrieval.configure(Configuration(api_key="key-a")):
+        with (
+            waterdata.parallel_chunks(2),
+            pytest.raises(dataretrieval.QuotaExhausted) as excinfo,
+        ):
+            get_daily(monitoring_location_id=sites, parameter_code="00060")
+
+    # The block has exited; a different key is now ambient.
+    with dataretrieval.configure(Configuration(api_key="key-b")):
+        excinfo.value.call.resume()
+
+    assert keys_by_site == {"USGS-01": ["key-a"], "USGS-02": ["key-a", "key-a"]}

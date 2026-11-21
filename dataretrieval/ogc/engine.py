@@ -375,7 +375,8 @@ def get_ogc_data(
     # The plan sizes candidate chunks and a later ``exc.call.resume()``
     # rebuilds them through these same bound callables, so the values the
     # call was created with apply to every chunk — even a resume invoked long
-    # after this function returned — without any ambient state to snapshot.
+    # after this function returned. The one ambient value, the API key, is
+    # captured by ``FanOut`` itself.
     build_request = functools.partial(
         _construct_api_requests, base_url=base_url, dialect=dialect
     )

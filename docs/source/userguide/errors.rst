@@ -102,6 +102,11 @@ partway, the work already completed is preserved: catch
             except FanOutInterrupted as again:
                 exc = again
 
+A resumed call keeps the API key it was created with, so it still works after
+the ``configure()`` block that supplied the key has exited. The concurrency
+cap is the exception: it is read again at each ``resume()``, so a lower one set
+before resuming applies.
+
 The same loop works for ``nwdc.get_wateruse`` with a list of states,
 counties, or HUCs.
 
