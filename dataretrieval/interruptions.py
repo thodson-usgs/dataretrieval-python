@@ -273,12 +273,22 @@ def _walk_causes(
             pending.append(current.__cause__)
 
 
+#: ``httpx`` failures that repeat identically on every attempt.
+_DETERMINISTIC_HTTPX_ERRORS = (
+    httpx.UnsupportedProtocol,
+    httpx.LocalProtocolError,
+    httpx.TooManyRedirects,
+    httpx.DecodingError,
+)
+
+
 def _deterministic_failure(exc: BaseException) -> bool:
     """Whether a transport failure would fail identically on every retry.
 
-    True for an unsupported scheme, a malformed request, or a hostname the
-    resolver rejects permanently. A *temporary* resolver failure is not in that
-    class and stays retryable (see :data:`_PERMANENT_DNS_ERRORS`). Bounding
+    True for an unsupported scheme, a malformed request, a redirect loop, a
+    body that cannot be decoded, or a hostname the resolver rejects
+    permanently. A *temporary* resolver failure is not in that class and
+    stays retryable (see :data:`_PERMANENT_DNS_ERRORS`). Bounding
     retry to failures a later attempt might not repeat is ADR 0006.
 
     Walks ``__context__`` as well as ``__cause__``, because the original
@@ -290,7 +300,7 @@ def _deterministic_failure(exc: BaseException) -> bool:
     spending the whole retry budget on a hostname that will never resolve.
     """
     for current in _walk_causes(exc, follow_context=True):
-        if isinstance(current, (httpx.UnsupportedProtocol, httpx.LocalProtocolError)):
+        if isinstance(current, _DETERMINISTIC_HTTPX_ERRORS):
             return True
         if isinstance(current, socket.gaierror):
             # Return, not continue: the first resolver code found decides.

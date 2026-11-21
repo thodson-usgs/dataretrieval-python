@@ -641,3 +641,46 @@ class TestErrorForStatus:
         construction raises instead."""
         with pytest.raises(TypeError, match="requires status_code"):
             exceptions.TransientError("boom")
+
+
+# --- non-transport httpx failures stay inside the package taxonomy ----------
+
+_NON_TRANSPORT_FAILURES = [
+    pytest.param(
+        httpx.TooManyRedirects("Exceeded maximum allowed redirects."), id="redirects"
+    ),
+    pytest.param(httpx.DecodingError("invalid gzip stream"), id="decoding"),
+]
+
+
+@pytest.mark.parametrize("failure", _NON_TRANSPORT_FAILURES)
+def test_single_shot_get_wraps_request_errors_that_are_not_transport_errors(
+    failure: httpx.RequestError,
+) -> None:
+    """``TooManyRedirects`` and ``DecodingError`` are ``RequestError`` but not
+    ``TransportError``; the documented promise is that callers never catch httpx."""
+    from dataretrieval.transport import http
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure
+
+    with pytest.raises(NetworkError, match="Could not reach the service") as excinfo:
+        http.get("https://example.test/data", transport=httpx.MockTransport(handler))
+    assert excinfo.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("failure", _NON_TRANSPORT_FAILURES)
+def test_these_failures_are_deterministic_so_neither_retried_nor_resumable(
+    failure: httpx.RequestError,
+) -> None:
+    """A redirect loop or undecodable body repeats on every attempt, so offering
+    a resumable ``ServiceInterrupted`` (ADR 0004) would hand out a handle that
+    can never succeed."""
+    from dataretrieval.interruptions import _classify_chunk_error
+    from dataretrieval.transport.http import network_error
+
+    wrapped = network_error("https://example.test/data", failure)
+    wrapped.__cause__ = failure
+    assert retry._retryable(wrapped) == (False, None)
+    assert _classify_chunk_error(wrapped) is None
+    assert _classify_chunk_error(failure) is None

@@ -2564,3 +2564,26 @@ class TestSetResponseUrl:
         assert str(response.url) == "https://example.test/combined"
         # A shallow copy sharing the old request must not see the new URL.
         assert str(original.url) == "https://example.test/chunk1"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.TooManyRedirects("Exceeded maximum allowed redirects."),
+        httpx.DecodingError("invalid gzip stream"),
+    ],
+    ids=["redirects", "decoding"],
+)
+def test_fan_out_wraps_request_errors_that_are_not_transport_errors(failure):
+    """A redirect loop or undecodable body inside a fan-out surfaces as a
+    ``NetworkError``, not a raw httpx exception and not a resumable interruption."""
+
+    @multi_value_chunked(build_request=_fake_build, url_limit=8000)
+    async def fetch(_args):
+        raise failure
+
+    with pytest.raises(NetworkError) as excinfo:
+        fetch({"sites": ["S1"]})
+
+    assert not isinstance(excinfo.value, ChunkInterrupted)
+    assert excinfo.value.__cause__ is failure

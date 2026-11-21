@@ -327,7 +327,7 @@ class FanOut(Generic[_Chunk]):
     def _normalize_failure(self, exc: BaseException) -> BaseException:
         """Map an explicitly caused transport failure into the public taxonomy."""
         for current in _walk_causes(exc):
-            if isinstance(current, httpx.TransportError):
+            if isinstance(current, httpx.RequestError):
                 wrapped = network_error(
                     self.canonical_url or "unknown service", current
                 )

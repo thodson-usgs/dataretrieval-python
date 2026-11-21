@@ -77,14 +77,19 @@ HTTPX_ASYNC_DEFAULTS: dict[str, Any] = {
 }
 
 
-def network_error(url: str | httpx.URL, exc: httpx.TransportError) -> NetworkError:
-    """Build a typed error for a failed round trip with no HTTP response."""
+def network_error(url: str | httpx.URL, exc: httpx.RequestError) -> NetworkError:
+    """Build a typed error for a request that failed with no usable HTTP response.
+
+    ``httpx.RequestError`` is wider than ``TransportError``: it also covers
+    ``TooManyRedirects`` and ``DecodingError``, which no caller should have to
+    catch as httpx.
+    """
     detail = str(exc) or type(exc).__name__
     return NetworkError(f"Could not reach the service at {url}: {detail}")
 
 
 def get(url: str | httpx.URL, **kwargs: Any) -> httpx.Response:
-    """Issue one guarded synchronous GET and map transport failures."""
+    """Issue one guarded synchronous GET and map request failures."""
     client_options: dict[str, Any] = {
         key: kwargs.pop(key)
         for key in ("follow_redirects", "timeout", "transport", "verify")
@@ -94,7 +99,7 @@ def get(url: str | httpx.URL, **kwargs: Any) -> httpx.Response:
     try:
         with httpx.Client(**client_options) as client:
             return client.get(url, **kwargs)
-    except httpx.TransportError as exc:
+    except httpx.RequestError as exc:
         raise network_error(url, exc) from exc
 
 
