@@ -725,7 +725,7 @@ def _resolve(name: str, adapter: str | None = None) -> tuple[str | None, str, st
         ``_DEFAULT`` when nothing configured it.
     """
     _check_adapter_known(adapter)
-    _check_env_not_refused(name)
+    _check_env_not_refused(name, adapter)
 
     # ``None`` unless this adapter reads this setting, so a setting
     # outside its vocabulary resolves package-wide rather than checking a
@@ -761,7 +761,7 @@ def _check_adapter_known(adapter: str | None) -> None:
         )
 
 
-def _check_env_not_refused(name: str) -> None:
+def _check_env_not_refused(name: str, adapter: str | None) -> None:
     """Raise if an environment variable is set for an adapter-only setting.
 
     Refused before anything is consulted, not when the chain reaches the environment
@@ -773,6 +773,14 @@ def _check_env_not_refused(name: str) -> None:
     if refused is None or refused not in os.environ:
         return
     block_only = name in BLOCK_ONLY_SETTINGS
+    # The reading adapter's own class when it has the field, so the remedy is a
+    # call that works; otherwise the placeholder rather than a class that rejects it.
+    registered = _REGISTRY.get(adapter) if adapter is not None else None
+    config_class = (
+        registered.__name__
+        if registered is not None and name in registered.settings()
+        else "<Adapter>Configuration"
+    )
     fault = (
         "may only be set in code, in a configure() block, never from the environment"
         if block_only
@@ -786,7 +794,7 @@ def _check_env_not_refused(name: str) -> None:
     raise ConfigurationError(
         f"{_env_label(refused)} is set, but {name!r} {fault}. Unset it and pass "
         f"the value on the adapter's configuration, e.g. "
-        f"WaterdataConfiguration({name}=...){or_the_file}."
+        f"{config_class}({name}=...){or_the_file}."
     )
 
 

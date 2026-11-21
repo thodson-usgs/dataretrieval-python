@@ -2227,3 +2227,28 @@ def test_show_configuration_reports_an_unresolvable_path_as_the_file_row(
     text = out.getvalue()
     assert "config file  <unresolved:" in text
     assert "working directory is unavailable" in text
+
+
+@pytest.mark.parametrize(
+    "cls", [WqpConfiguration, NgwmnConfiguration, WaterdataConfiguration]
+)
+def test_a_refused_variable_names_the_adapter_that_was_reading_it(monkeypatch, cls):
+    """The remedy must be a call the reading adapter accepts, not always Waterdata's."""
+    monkeypatch.setenv("API_USGS_BASE_URL", "https://evil.example")
+    with pytest.raises(configuration.ConfigurationError) as excinfo:
+        configuration.base_url(adapter=cls.adapter)
+    assert f"{cls.__name__}(base_url=...)" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("name", "adapter"), [("base_url", None), ("api_version", "ngwmn")]
+)
+def test_a_refused_variable_names_no_class_that_lacks_the_setting(
+    monkeypatch, name, adapter
+):
+    """Read package-wide, or by an adapter without the field, the remedy is the
+    placeholder: naming a class that rejects the setting would be a broken call."""
+    monkeypatch.setenv(f"API_USGS_{name.upper()}", "v0")
+    with pytest.raises(configuration.ConfigurationError) as excinfo:
+        getattr(configuration, name)(adapter=adapter)
+    assert f"<Adapter>Configuration({name}=...)" in str(excinfo.value)
