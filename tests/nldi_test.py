@@ -20,7 +20,7 @@ from dataretrieval.nldi import (
 @pytest.fixture(autouse=True)
 def _reset_data_source_cache(monkeypatch):
     """Reset the module-level cache between tests."""
-    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", None)
+    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", {})
 
 
 def mock_request_data_sources(httpx_mock):
@@ -480,7 +480,7 @@ def test_validate_data_source_rejects_malformed_catalog(httpx_mock, monkeypatch)
     if the NLDI base URL returns a non-list shape (or a list whose entries have no
     ``source`` keys), instead of raising ``TypeError: string indices must be integers``.
     """
-    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", None)
+    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", {})
     httpx_mock.add_response(
         method="GET",
         url=f"{NLDI_API_BASE_URL}/",
@@ -535,6 +535,28 @@ def test_a_configured_base_url_redirects_every_nldi_request(httpx_mock):
     assert {str(r.url).startswith(mirror) for r in httpx_mock.get_requests()} == {True}
 
 
+def test_data_source_catalog_is_cached_per_base_url(httpx_mock):
+    """A mirror's sources are validated against the mirror, not the first service seen.
+
+    The catalog used to be cached once per process, so after a call against the
+    default service a ``NldiConfiguration(base_url=...)`` block accepted that
+    service's sources and rejected the mirror's own, without asking the mirror.
+    """
+    mirror = "https://mirror.example/nldi"
+    httpx_mock.add_response(
+        method="GET", url=f"{NLDI_API_BASE_URL}/", json=[{"source": "WQP"}]
+    )
+    httpx_mock.add_response(method="GET", url=f"{mirror}/", json=[{"source": "mine"}])
+
+    nldi._validate_data_source("WQP")
+    with dataretrieval.configure(nldi.NldiConfiguration(base_url=mirror)):
+        nldi._validate_data_source("mine")
+        with pytest.raises(ValueError, match="Invalid data source: 'WQP'"):
+            nldi._validate_data_source("WQP")
+    nldi._validate_data_source("WQP")  # cached: the default catalog is not re-fetched
+    assert len(httpx_mock.get_requests()) == 2
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -556,7 +578,9 @@ def test_navigation_without_a_data_source_says_what_to_add(kwargs, monkeypatch):
     # Seed the catalog: the feature_source case validates it before failing, and the
     # autouse fixture clears it, so an unseeded run would make a network request for a
     # failure that is local.
-    monkeypatch.setattr(nldi, "_AVAILABLE_DATA_SOURCES", ["WQP", "nwissite"])
+    monkeypatch.setattr(
+        nldi, "_AVAILABLE_DATA_SOURCES", {NLDI_API_BASE_URL: ["WQP", "nwissite"]}
+    )
     with pytest.raises(ValueError) as excinfo:
         get_features(**kwargs)
     message = str(excinfo.value)
