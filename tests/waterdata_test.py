@@ -2104,3 +2104,56 @@ def test_a_list_value_with_an_apostrophe_folds_into_a_text_filter():
         monitoring_location_name=names, filter="agency_code = 'USGS'"
     )
     assert sorted(df["monitoring_location_name"]) == names
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: get_samples(monitoring_location_id="USGS-00123"),
+        lambda: get_samples_summary(monitoring_location_id="USGS-00123"),
+    ],
+    ids=["get_samples", "get_samples_summary"],
+)
+def test_samples_getters_honour_waterdata_retries(httpx_mock, monkeypatch, call):
+    """A 503 then a 200 succeeds under ``retries=1``: the Samples getters retry."""
+    from dataretrieval import Configuration, configure
+    from dataretrieval.transport import retry
+    from dataretrieval.waterdata import WaterdataConfiguration
+
+    monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
+    httpx_mock.add_response(status_code=503)
+    httpx_mock.add_response(text=_SAMPLES_CODE_CSV)
+    with configure(Configuration(), WaterdataConfiguration(retries=1)):
+        df, _ = call()
+    assert len(df) == 2
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_get_codes_honours_waterdata_retries(httpx_mock, monkeypatch):
+    """``get_codes`` retries a 503 under ``retries=1`` instead of raising."""
+    from dataretrieval import Configuration, configure
+    from dataretrieval.transport import retry
+    from dataretrieval.waterdata import WaterdataConfiguration, get_codes
+
+    monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
+    httpx_mock.add_response(status_code=503)
+    httpx_mock.add_response(json={"data": [{"code": "WI"}]})
+    with configure(Configuration(), WaterdataConfiguration(retries=1)):
+        df, _ = get_codes("states")
+    assert list(df["code"]) == ["WI"]
+
+
+def test_samples_does_not_retry_a_rejected_query_500(httpx_mock, monkeypatch):
+    """A 500 is a rejected query on a single-shot call; it is not re-sent."""
+    from dataretrieval import Configuration, configure
+    from dataretrieval.exceptions import HTTPError
+    from dataretrieval.transport import retry
+    from dataretrieval.waterdata import WaterdataConfiguration
+
+    monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
+    httpx_mock.add_response(status_code=500)
+    httpx_mock.add_response(text=_SAMPLES_CODE_CSV)
+    with configure(Configuration(), WaterdataConfiguration(retries=1)):
+        with pytest.raises(HTTPError):
+            get_samples_summary(monitoring_location_id="USGS-00123")
+    assert len(httpx_mock.get_requests()) == 1

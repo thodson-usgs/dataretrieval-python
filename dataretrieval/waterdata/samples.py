@@ -18,7 +18,7 @@ import httpx
 import pandas as pd
 
 from dataretrieval._csv import read_code_csv
-from dataretrieval._querying import to_str
+from dataretrieval._querying import _single_request_policy, to_str
 from dataretrieval._response_metadata import BaseMetadata
 from dataretrieval._validation import require_one_of
 from dataretrieval._wqx import _attach_datetime_columns
@@ -32,6 +32,7 @@ from dataretrieval.transport.http import (
 from dataretrieval.transport.http import (
     get as _get,
 )
+from dataretrieval.transport.retry import retry_sync
 from dataretrieval.waterdata.endpoints import samples_url
 from dataretrieval.waterdata.types import (
     CODE_SERVICES,
@@ -45,6 +46,23 @@ from dataretrieval.waterdata.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_checked(url: str, **kwargs: Any) -> httpx.Response:
+    """GET a Samples URL, raising a typed error on non-200 and retrying transients.
+
+    The retry budget (``retries``, ``stall_timeout``) is the ``waterdata`` adapter's,
+    like every other Water Data getter. A Samples call is single-shot, so only the
+    gateway statuses are re-sent (ADR 0006): the service may answer a rejected
+    query with a 500.
+    """
+
+    def attempt() -> httpx.Response:
+        response = _get(url, headers=_default_headers(url), **kwargs, **HTTPX_DEFAULTS)
+        _raise_for_non_200(response)
+        return response
+
+    return retry_sync(attempt, _single_request_policy("waterdata"))
 
 
 def get_codes(code_service: CODE_SERVICES) -> tuple[pd.DataFrame, BaseMetadata]:
@@ -68,9 +86,7 @@ def get_codes(code_service: CODE_SERVICES) -> tuple[pd.DataFrame, BaseMetadata]:
 
     url = f"{samples_url()}/codeservice/{code_service}?mimeType=application%2Fjson"
 
-    response = _get(url, headers=_default_headers(url), **HTTPX_DEFAULTS)
-
-    _raise_for_non_200(response)
+    response = _get_checked(url)
 
     data_dict = json.loads(response.text)
     data_list = data_dict["data"]
@@ -86,20 +102,14 @@ def _get_samples_csv(
     """Issue a Samples CSV request and parse the body into a DataFrame.
 
     Shared final step for the Samples getters: sends the GET with the standard
-    headers (including ``X-Api-Key``), raises a typed error on a non-200
-    (consistent with the OGC/stats path) instead of a bare
-    ``HTTPStatusError``, and reads the CSV. The caller wraps the response
+    headers (including ``X-Api-Key``), retries transient failures per the
+    ``waterdata`` configuration, raises a typed error on a non-200 (consistent
+    with the OGC/stats path) instead of a bare ``HTTPStatusError``, and reads
+    the CSV. The caller wraps the response
     as metadata and applies any per-getter post-step.
     """
     logger.debug("Request: %s", httpx.URL(url).copy_merge_params(params))
-    response = _get(
-        url,
-        params=params,
-        verify=ssl_check,
-        headers=_default_headers(url),
-        **HTTPX_DEFAULTS,
-    )
-    _raise_for_non_200(response)
+    response = _get_checked(url, params=params, verify=ssl_check)
     df = read_code_csv(response.text)
     return df, response
 
