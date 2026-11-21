@@ -492,6 +492,19 @@ class Configuration(BaseConfiguration):
     parallel_chunks: int | None = _UNSET
     stall_timeout: float | int | None = _UNSET
 
+    def __repr__(self) -> str:
+        # The generated repr would print ``api_key`` in clear text into tracebacks,
+        # logs, and notebook output. ``show_configuration`` already reports it as
+        # ``<set>``; the object's own text does the same. Otherwise this matches
+        # the generated repr.
+        parts = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            hidden = f.name == "api_key" and isinstance(value, str)
+            text = "<set>" if hidden else repr(value)
+            parts.append(f"{f.name}={text}")
+        return f"{type(self).__name__}({', '.join(parts)})"
+
 
 #: The package-wide settings, in the order :func:`show_configuration` reports
 #: them -- the fields of :class:`Configuration`, derived rather than restated.

@@ -2227,3 +2227,31 @@ def test_show_configuration_reports_an_unresolvable_path_as_the_file_row(
     text = out.getvalue()
     assert "config file  <unresolved:" in text
     assert "working directory is unavailable" in text
+
+
+_SECRET = "SECRET-123"
+
+
+def test_configuration_repr_and_str_never_contain_the_api_key():
+    config = Configuration(api_key=_SECRET, retries=2)
+    for text in (repr(config), str(config), f"{config!r}", f"{config}"):
+        assert _SECRET not in text
+        assert "api_key=<set>" in text
+        assert "retries=2" in text
+
+
+def test_configuration_repr_distinguishes_unset_from_none():
+    assert "api_key=<not set>" in repr(Configuration())
+    assert "api_key=None" in repr(Configuration(api_key=None))
+
+
+def test_adapter_configurations_cannot_carry_the_api_key():
+    # If one ever can, its repr must redact it like ``Configuration`` does.
+    for cls in (
+        WaterdataConfiguration,
+        NgwmnConfiguration,
+        NwdcConfiguration,
+        StreamstatsConfiguration,
+        WqpConfiguration,
+    ):
+        assert "api_key" not in cls.settings()
