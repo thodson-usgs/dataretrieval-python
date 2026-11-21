@@ -27,7 +27,7 @@ settings are resolved there, through the chain in
 :mod:`dataretrieval.configuration`.
 
 Dedup: list-axis chunks don't overlap; filter-axis chunks can, so
-``_combine_chunk_frames`` dedupes by feature ``id``. ``properties``,
+the call asks ``_combine_chunk_frames`` to dedupe by feature ``id``. ``properties``,
 ``bbox``, date intervals, ``limit``, ``skip_geometry``, and
 ``filter``/``filter_lang`` themselves are never sliced as list axes
 (the filter is partitioned along its top-level OR axis instead).
@@ -258,6 +258,9 @@ def multi_value_chunked(
                 # opens. ``get_ogc_data`` puts it in ``args``.
                 service=args.get("collection"),
                 adapter=adapter,
+                # Filter-axis chunks can match the same feature; ``id`` is the
+                # OGC feature id, which only this engine knows is unique.
+                dedupe_on="id",
             ).resume()
 
         return wrapper

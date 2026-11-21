@@ -641,3 +641,20 @@ class TestErrorForStatus:
         construction raises instead."""
         with pytest.raises(TypeError, match="requires status_code"):
             exceptions.TransientError("boom")
+
+
+def test_fan_out_keeps_repeated_id_rows_unless_a_dedupe_key_is_given() -> None:
+    """The executor is service-neutral: an ``id`` column means nothing to it.
+
+    A non-OGC result may legitimately repeat ``id`` across items, so only an
+    adapter that names a dedupe key (the OGC engine) has rows dropped.
+    """
+
+    async def operation(item: str) -> tuple[pd.DataFrame, httpx.Response]:
+        return pd.DataFrame({"id": [1, 2], "item": [item, item]}), _response()
+
+    frame, _ = FanOut(["a", "b"], operation).resume()
+    assert len(frame) == 4
+
+    frame, _ = FanOut(["a", "b"], operation, dedupe_on="id").resume()
+    assert len(frame) == 2

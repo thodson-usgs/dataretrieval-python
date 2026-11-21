@@ -148,9 +148,11 @@ Consequences
   the failure are fetched again. This already applied to OGC -- a partial walk
   is never recorded in the completion map -- and is a cost, not a correctness
   problem.
-- Water Use frames have ``huc12_id``, not ``id``, so ``_combine_chunk_frames``
-  concatenates them without deduplicating. Correct, because locations partition
-  by construction, but the executor's deduplication does not apply there.
+- Deduplication is opt-in. ``FanOut(dedupe_on=...)`` names the column that
+  keys a row, and only the OGC engine passes one (``"id"``, the feature id).
+  Water Use and ratings concatenate every row: their locations partition by
+  construction, and the executor does not know that a column called ``id`` is
+  a key there.
 - ``transport`` is no longer a pure leaf: ``fanout`` is a composite that
   runs the retry loop, provides the client that pagination uses, and calls
   ``combining``. It remains HTTP execution policy, which is the test the

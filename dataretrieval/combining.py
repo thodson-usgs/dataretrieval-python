@@ -116,20 +116,24 @@ def _merge_response(
     return merged
 
 
-def _combine_chunk_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
-    """Concatenate per-chunk frames and deduplicate IDs across chunks.
+def _combine_chunk_frames(
+    frames: list[pd.DataFrame], dedupe_on: str | None = None
+) -> pd.DataFrame:
+    """Concatenate per-chunk frames, optionally deduplicating on a key column.
 
     Empty frames are ignored before concatenation so an empty plain
     :class:`pandas.DataFrame` cannot reduce a ``GeoDataFrame`` to a plain frame and
     strip its geometry or CRS. When every frame is empty, the first frame is
     returned to preserve its concrete type.
 
-    When multiple non-empty frames are combined, non-null feature IDs are
-    deduplicated regardless of the plan axis. Filter clauses can match the same
-    feature, and list inputs can contain repeated values or otherwise select
-    overlapping records. Rows without an ``id`` are preserved verbatim: pandas
-    treats null values as duplicates, so deduplicating them would drop rows with no
-    indication.
+    Rows are concatenated verbatim unless the caller names ``dedupe_on``: a column
+    called ``id`` means something only to a service that says so, and repeats of it
+    in another service's frames are data. When the caller does name one (the OGC
+    engine passes ``"id"``, the feature id), non-null keys are deduplicated across
+    chunks regardless of the plan axis, because filter clauses can match the same
+    feature and list inputs can contain repeated values. Rows without a key are
+    preserved verbatim: pandas treats null values as duplicates, so deduplicating
+    them would drop rows with no indication.
     """
     non_empty = [frame for frame in frames if not frame.empty]
     if not non_empty:
@@ -138,16 +142,15 @@ def _combine_chunk_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
         return non_empty[0].copy()
 
     combined = pd.concat(non_empty, ignore_index=True)
-    if "id" not in combined.columns:
+    if dedupe_on is None or dedupe_on not in combined.columns:
         return combined
 
-    has_id = combined["id"].notna()
-    if has_id.all():
-        return combined.drop_duplicates(subset="id", ignore_index=True)
-    if has_id.any():
-        id_rows = combined[has_id].drop_duplicates(subset="id")
-        no_id_rows = combined[~has_id]
-        return pd.concat([id_rows, no_id_rows], ignore_index=True)
+    has_key = combined[dedupe_on].notna()
+    if has_key.all():
+        return combined.drop_duplicates(subset=dedupe_on, ignore_index=True)
+    if has_key.any():
+        keyed = combined[has_key].drop_duplicates(subset=dedupe_on)
+        return pd.concat([keyed, combined[~has_key]], ignore_index=True)
     return combined
 
 

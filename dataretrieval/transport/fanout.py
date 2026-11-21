@@ -216,6 +216,12 @@ class FanOut(Generic[_Chunk]):
         response so the caller sees the request they made rather than
         whichever chunk completed last. Also the destination
         :meth:`resume` labels its progress line with.
+    dedupe_on : str or None, optional
+        Name of a column that uniquely identifies a row. When given, rows
+        repeating a non-null value of it across chunks are dropped from the
+        combined frame (chunks can overlap, and list inputs can repeat a
+        value). ``None`` (the default) concatenates every row, so a service
+        whose frames repeat an ``id`` loses nothing.
     service : str or None, optional
         Display name of what is being retrieved (e.g. ``"daily"``,
         ``"nwdc"``), used to label the progress line :meth:`resume`
@@ -252,6 +258,7 @@ class FanOut(Generic[_Chunk]):
         canonical_url: str | None = None,
         service: str | None = None,
         adapter: str | None = None,
+        dedupe_on: str | None = None,
     ) -> None:
         self.plan = plan
         self.fetch = fetch
@@ -268,6 +275,10 @@ class FanOut(Generic[_Chunk]):
         # and is variously a collection name or prose. ``None`` resolves
         # package-wide. See ADR 0010.
         self.adapter = adapter
+        # Column to deduplicate the combined frame on, or ``None`` to keep every
+        # row. The executor names no service, so only an adapter that knows a
+        # column is a unique key (the OGC engine: feature ``id``) opts in.
+        self.dedupe_on = dedupe_on
         # This service's preferred cap for when nothing is configured. Resolved at
         # resume time, not here, so a setting made after this call was built still
         # applies. Anything the chain resolves outranks it -- see
@@ -362,7 +373,9 @@ class FanOut(Generic[_Chunk]):
 
     def _combine_frames(self) -> pd.DataFrame:
         """Combine completed frames in deterministic chunk order."""
-        return _combine_chunk_frames([self._chunks[i][0] for i in sorted(self._chunks)])
+        return _combine_chunk_frames(
+            [self._chunks[i][0] for i in sorted(self._chunks)], self.dedupe_on
+        )
 
     def _combine_responses(self) -> httpx.Response:
         """Aggregate completed responses under the canonical request URL."""

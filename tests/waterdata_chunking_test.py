@@ -1166,7 +1166,7 @@ def test_combine_chunk_frames_does_not_collapse_none_ids():
     # different rows that must both be kept.
     df_a = pd.DataFrame({"id": ["x", "y"], "val": [1, 2]})
     df_b = pd.DataFrame({"id": [np.nan, np.nan], "val": [3, 4]})
-    combined = _combine_chunk_frames([df_a, df_b])
+    combined = _combine_chunk_frames([df_a, df_b], "id")
 
     # 4 rows preserved: 2 id-bearing + 2 id-less (NaN rows NOT merged).
     assert len(combined) == 4
@@ -1177,8 +1177,15 @@ def test_combine_chunk_frames_still_dedupes_overlapping_ids():
     """Duplicate feature IDs collapse regardless of why chunks overlap."""
     df_a = pd.DataFrame({"id": ["x", "y"], "val": [1, 2]})
     df_b = pd.DataFrame({"id": ["y", "z"], "val": [2, 3]})
-    combined = _combine_chunk_frames([df_a, df_b])
+    combined = _combine_chunk_frames([df_a, df_b], "id")
     assert sorted(combined["id"].tolist()) == ["x", "y", "z"]
+
+
+def test_combine_chunk_frames_keeps_repeated_ids_without_a_key():
+    """Deduplication is opt-in: with no key named, an ``id`` column is data."""
+    df_a = pd.DataFrame({"id": ["x", "y"], "val": [1, 2]})
+    df_b = pd.DataFrame({"id": ["y", "z"], "val": [2, 3]})
+    assert len(_combine_chunk_frames([df_a, df_b])) == 4
 
 
 def test_list_axis_chunks_dedupe_repeated_feature_ids():
