@@ -116,7 +116,7 @@ class FanOutInterrupted(DataRetrievalError):
         "Fan-out interrupted after {completed_chunks}/"
         "{total_chunks} chunks; call .call.resume() to continue."
     )
-    retryable: ClassVar[bool] = True
+    retryable = True
 
     def __init__(
         self,

@@ -17,6 +17,7 @@ from dataretrieval.credentials import (
     strip_api_key_from_untrusted_host_async,
 )
 from dataretrieval.exceptions import NetworkError
+from dataretrieval.interruptions import _deterministic_failure
 
 # Re-exported for the adapters that import credential policy through the
 # transport module they already import. ``dataretrieval.credentials`` is the
@@ -78,9 +79,16 @@ HTTPX_ASYNC_DEFAULTS: dict[str, Any] = {
 
 
 def network_error(url: str | httpx.URL, exc: httpx.TransportError) -> NetworkError:
-    """Build a typed error for a failed round trip with no HTTP response."""
+    """Build a typed error for a failed round trip with no HTTP response.
+
+    ``retryable`` follows the retry loop's own verdict, so a caller branching
+    on it is not told to retry an unsupported scheme or a hostname that
+    can never resolve.
+    """
     detail = str(exc) or type(exc).__name__
-    return NetworkError(f"Could not reach the service at {url}: {detail}")
+    error = NetworkError(f"Could not reach the service at {url}: {detail}")
+    error.retryable = not _deterministic_failure(exc)
+    return error
 
 
 def get(url: str | httpx.URL, **kwargs: Any) -> httpx.Response:

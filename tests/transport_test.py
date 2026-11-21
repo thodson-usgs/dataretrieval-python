@@ -641,3 +641,23 @@ class TestErrorForStatus:
         construction raises instead."""
         with pytest.raises(TypeError, match="requires status_code"):
             exceptions.TransientError("boom")
+
+
+def test_network_error_retryable_reflects_deterministic_failure() -> None:
+    """``NetworkError.retryable`` agrees with what the retry loop will do.
+
+    A caller that branches on ``e.retryable`` must not be told to retry an
+    unsupported scheme or a hostname that can never resolve.
+    """
+    from dataretrieval.transport.http import network_error
+
+    permanent = httpx.ConnectError("no such host")
+    permanent.__context__ = socket.gaierror(socket.EAI_NONAME, "unknown")
+    temporary = httpx.ConnectError("resolver busy")
+    temporary.__context__ = socket.gaierror(socket.EAI_AGAIN, "try again")
+
+    assert not network_error("https://x", httpx.UnsupportedProtocol("scheme")).retryable
+    assert not network_error("https://x", permanent).retryable
+    assert network_error("https://x", temporary).retryable
+    assert network_error("https://x", httpx.ConnectTimeout("slow")).retryable
+    assert NetworkError("bare").retryable  # default stays retryable

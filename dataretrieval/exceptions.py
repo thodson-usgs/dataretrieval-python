@@ -88,8 +88,10 @@ class DataRetrievalError(Exception):
     retry_after: float | None = None
     #: Whether re-issuing the same request might succeed -- ``True`` for the
     #: transient HTTP statuses (429 / 5xx, :class:`TransientError`) and for
-    #: connection failures (:class:`NetworkError`); ``False`` otherwise.
-    retryable: ClassVar[bool] = False
+    #: connection failures (:class:`NetworkError`) a later attempt could
+    #: survive; ``False`` otherwise. A class default, set per instance where
+    #: the failure itself decides (:func:`~dataretrieval.transport.http.network_error`).
+    retryable: bool = False
 
     # These errors get pickled back across process boundaries (a lithops /
     # multiprocessing worker returns whatever it raises). Default ``BaseException``
@@ -168,7 +170,7 @@ class TransientError(HTTPError):
         header; ``None`` when the header is absent or unparseable.
     """
 
-    retryable: ClassVar[bool] = True
+    retryable = True
 
     #: Canonical status a concrete transient sets when built without an
     #: explicit ``status_code`` (:class:`RateLimited` = 429,
@@ -256,10 +258,12 @@ class NetworkError(DataRetrievalError):
 
     Wraps the underlying ``httpx`` transport exception, preserved on
     ``__cause__``. Retryable (:attr:`~DataRetrievalError.retryable` is
-    ``True``), but has no ``.status_code`` because no response came back.
+    ``True``) unless the failure is deterministic -- an unsupported scheme or a
+    hostname that can never resolve -- which no later attempt would change. It
+    has no ``.status_code`` because no response came back.
     """
 
-    retryable: ClassVar[bool] = True
+    retryable = True
 
 
 # --- Invalid configuration -----------------------------------------------

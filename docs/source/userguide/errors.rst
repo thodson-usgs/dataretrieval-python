@@ -38,7 +38,9 @@ read-anywhere fields, so you rarely need to import the specific subclasses:
 * ``.retry_after`` -- seconds the server specified to wait (its ``Retry-After``
   header), or ``None``.
 * ``.retryable`` -- ``True`` when re-issuing the same request might succeed (a
-  429 / 5xx, or a connection failure); ``False`` otherwise.
+  429 / 5xx, or a connection failure that a later attempt could survive;
+  not an unsupported scheme or a hostname that can never resolve); ``False``
+  otherwise.
 
 .. code-block:: python
 
