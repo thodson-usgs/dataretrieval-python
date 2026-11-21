@@ -304,7 +304,7 @@ def get_monitoring_locations(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -628,7 +628,7 @@ def get_time_series_metadata(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -863,7 +863,7 @@ site_type_code : string or iterable of strings, optional
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -1029,7 +1029,7 @@ def get_field_measurements_metadata(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.

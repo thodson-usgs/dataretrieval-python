@@ -177,7 +177,7 @@ def get_daily(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -413,7 +413,7 @@ def get_continuous(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -454,8 +454,8 @@ def get_continuous(
         ... )
 
         >>> # Pull several disjoint time windows in one call via a CQL
-        >>> # ``filter``. See ``dataretrieval.ogc.filters`` for the
-        >>> # full grammar, auto-chunking, and pitfalls.
+        >>> # ``filter``. See the CQL filters user guide for the
+        >>> # grammar, auto-chunking, and pitfalls.
         >>> df, md = dataretrieval.waterdata.get_continuous(
         ...     monitoring_location_id="USGS-02238500",
         ...     parameter_code="00060",
@@ -635,7 +635,7 @@ def get_latest_continuous(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -854,7 +854,7 @@ def get_latest_daily(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.

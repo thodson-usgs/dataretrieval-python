@@ -15,6 +15,7 @@ Contents
 
     configuration
     errors
+    filters
     timeconventions
     columntypes
     dataportals

@@ -667,3 +667,22 @@ def test_adr_references_resolve_to_a_record() -> None:
     assert not dangling, "citations name no such decision record:\n  " + "\n  ".join(
         dangling
     )
+
+
+def test_public_docstrings_do_not_point_readers_at_internal_modules() -> None:
+    """A public docstring must not send readers to a module the docs do not publish.
+
+    ``dataretrieval.ogc`` is internal (``.importlinter``) and has no reference
+    page, so a ``:mod:`` cross-reference to it renders as dead text.
+    """
+    import inspect
+
+    from dataretrieval import waterdata
+
+    offenders = [
+        name
+        for name in waterdata.__all__
+        if callable(obj := getattr(waterdata, name))
+        and "dataretrieval.ogc" in (inspect.getdoc(obj) or "")
+    ]
+    assert not offenders, f"docstrings cite an internal module: {offenders}"

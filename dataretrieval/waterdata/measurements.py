@@ -200,7 +200,7 @@ def get_field_measurements(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -363,7 +363,7 @@ def get_peaks(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
@@ -588,7 +588,7 @@ def get_channel(
     filter, filter_lang : optional
         Server-side CQL filter passed through as the OGC ``filter`` /
         ``filter-lang`` query parameters. See
-        :mod:`dataretrieval.ogc.filters` for syntax, auto-chunking,
+        :doc:`/userguide/filters` for syntax, auto-chunking,
         and the lexicographic-comparison pitfall.
     convert_type : boolean, optional
         If True, converts columns to appropriate types.
