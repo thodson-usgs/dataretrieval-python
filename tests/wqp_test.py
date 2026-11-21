@@ -452,17 +452,15 @@ def test_wqp_metadata_site_info_routes_to_what_sites(monkeypatch):
 
 
 def test_site_info_reuses_the_original_call_profile(httpx_mock):
-    """``site_info`` repeats the lookup with the original call's ``legacy``
-    and ``ssl_check``, so a WQX3.0 query is not answered by the legacy
-    Station service (and does not warn about it)."""
+    """``site_info`` repeats the lookup with the original call's ``legacy``,
+    so a WQX3.0 query is not answered by the legacy Station service (and
+    does not warn about it)."""
     with open("tests/data/wqp3_results.txt", encoding="utf-8") as text:
         httpx_mock.add_response(method="GET", text=text.read())
     with open("tests/data/wqp_sites.txt", encoding="utf-8") as text:
         httpx_mock.add_response(method="GET", text=text.read())
 
-    _, md = get_results(
-        legacy=False, ssl_check=False, siteid="WIDNR_WQX-10032762", dataProfile="narrow"
-    )
+    _, md = get_results(legacy=False, siteid="WIDNR_WQX-10032762")
     with warnings.catch_warnings():
         warnings.simplefilter("error", DataCurrencyWarning)
         sites, _ = md.site_info
