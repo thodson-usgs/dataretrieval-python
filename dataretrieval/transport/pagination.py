@@ -6,6 +6,7 @@ it with the shared executor, so an adapter supplies only its strategies.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -23,6 +24,7 @@ from dataretrieval.combining import (
 )
 from dataretrieval.credentials import accepts_api_key
 from dataretrieval.exceptions import DataRetrievalError, RateLimited
+from dataretrieval.interruptions import _classify_chunk_error
 
 # One-way: ``fanout`` does not import this module, so this edge cannot cycle.
 from dataretrieval.transport.fanout import (
@@ -61,10 +63,26 @@ def paginated_failure_message(
     cause: BaseException,
     url: str | httpx.URL | None = None,
 ) -> str:
-    """Build a message that names the recovery action for an interrupted page walk."""
+    """Build a message that names the recovery action for an interrupted page walk.
+
+    Retry advice is given only for a cause a later attempt might not repeat
+    (a transient the fan-out can resume, or an error marked ``retryable``).
+    A deterministic cause, such as a 404 or a next link naming another host,
+    gets advice that does not send the caller into a retry loop that cannot
+    succeed.
+    """
     cause_str = str(cause).removesuffix(".")
     if not cause_str.strip():
         cause_str = type(cause).__name__
+    if _classify_chunk_error(cause) is None and not getattr(cause, "retryable", False):
+        action = (
+            "this failure is not transient, so repeating the same request "
+            "will not help; correct the request or report the service problem"
+        )
+        return (
+            f"Paginated request failed after collecting {pages_collected} "
+            f"page(s): {cause_str}. To recover: {action}."
+        )
     if isinstance(cause, RateLimited):
         action = "wait for the rate-limit window to reset and retry"
     else:
@@ -77,6 +95,25 @@ def paginated_failure_message(
         f"request size (e.g. fewer locations, a shorter time range, or "
         f"a smaller ``limit``){token_advice}."
     )
+
+
+def _interrupted_walk(
+    pages_collected: int, cause: Exception, url: str | httpx.URL | None
+) -> DataRetrievalError:
+    """Wrap a page-walk failure, keeping the typed cause's class and fields.
+
+    A status error on page 2 must read the same as on page 1 (ADR 0004), so a
+    :class:`DataRetrievalError` cause is copied -- same class, ``status_code``,
+    ``retry_after`` -- with the "collected N pages" message in place of its own.
+    Any other cause (a parse failure, a refused link) has no fields to keep and
+    is wrapped in a plain :class:`DataRetrievalError`.
+    """
+    message = paginated_failure_message(pages_collected, cause, url)
+    if isinstance(cause, DataRetrievalError):
+        wrapped = copy.copy(cause)
+        wrapped.args = (message,)
+        return wrapped
+    return DataRetrievalError(message)
 
 
 async def paginate(
@@ -117,9 +154,7 @@ async def paginate(
             frame, cursor = parse_response(response)
         except Exception as exc:
             logger.warning("Initial response parse failed.")
-            raise DataRetrievalError(
-                paginated_failure_message(0, exc, response.url)
-            ) from exc
+            raise _interrupted_walk(0, exc, response.url) from exc
 
         frames = [frame]
         nrows = len(frame)
@@ -144,9 +179,7 @@ async def paginate(
                 logger.warning(
                     "Request failed at cursor %r. Data download interrupted.", cursor
                 )
-                raise DataRetrievalError(
-                    paginated_failure_message(len(frames), exc, response.url)
-                ) from exc
+                raise _interrupted_walk(len(frames), exc, response.url) from exc
 
         final_response = _merge_response(
             initial_response,

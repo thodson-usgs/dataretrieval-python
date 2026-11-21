@@ -24,8 +24,9 @@ from dataretrieval.exceptions import (
     RateLimited,
     ServiceUnavailable,
 )
+from dataretrieval.interruptions import ServiceInterrupted
 from dataretrieval.transport.fanout import FanOut
-from dataretrieval.transport.pagination import paginate
+from dataretrieval.transport.pagination import paginate, run_paginated
 
 
 def _response(
@@ -641,3 +642,137 @@ class TestErrorForStatus:
         construction raises instead."""
         with pytest.raises(TypeError, match="requires status_code"):
             exceptions.TransientError("boom")
+
+
+# --- failure typing across the page walk ----------------------------------
+
+
+def _walk_failing_on_page_two(
+    failure: BaseException | int,
+    *,
+    parse=None,
+) -> tuple[pd.DataFrame, httpx.Response]:
+    """Walk two pages whose follow-up fails as given (a status or an exception)."""
+    first = _response(url="https://example.test/page/1")
+    client = mock.AsyncMock(spec=httpx.AsyncClient)
+    client.send.return_value = first
+
+    def default_parse(response: httpx.Response) -> tuple[pd.DataFrame, str | None]:
+        return pd.DataFrame({"value": [1]}), "next"
+
+    async def follow(cursor: str, session: httpx.AsyncClient) -> httpx.Response:
+        if isinstance(failure, BaseException):
+            raise failure
+        return httpx.Response(
+            failure,
+            headers={"Retry-After": "7"},
+            request=httpx.Request("GET", "https://example.test/page/2"),
+        )
+
+    return asyncio.run(
+        paginate(
+            httpx.Request("GET", first.url),
+            parse_response=parse or default_parse,
+            follow_up=follow,
+            raise_for_status=_raise_for_status,
+            client=client,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "expected", "retryable"),
+    [
+        (404, HTTPError, False),
+        (503, ServiceUnavailable, True),
+        (429, RateLimited, True),
+    ],
+)
+def test_paginate_failure_after_first_page_keeps_status_fields(
+    status, expected, retryable
+) -> None:
+    """The same status is the same typed error on page 2 as on page 1."""
+    with pytest.raises(expected, match=r"collecting 1 page\(s\)") as excinfo:
+        _walk_failing_on_page_two(status)
+
+    assert type(excinfo.value) is expected
+    assert excinfo.value.status_code == status
+    assert excinfo.value.retryable is retryable
+    assert isinstance(excinfo.value.__cause__, HTTPError)
+    if retryable:
+        assert excinfo.value.retry_after == 7.0
+
+
+def test_paginate_failure_message_withholds_retry_for_deterministic_cause() -> None:
+    with pytest.raises(HTTPError) as excinfo:
+        _walk_failing_on_page_two(404)
+
+    assert "retry" not in str(excinfo.value).lower()
+    assert "To recover" in str(excinfo.value)
+
+
+def test_paginate_cross_host_link_is_not_advised_as_retryable() -> None:
+    cause = RuntimeError(
+        "refusing to follow a link to another host; retrying won't help"
+    )
+    with pytest.raises(DataRetrievalError) as excinfo:
+        _walk_failing_on_page_two(cause)
+
+    assert excinfo.value.__cause__ is cause
+    assert not excinfo.value.retryable
+    assert "retry the request" not in str(excinfo.value)
+
+
+def test_paginate_initial_parse_failure_keeps_typed_cause() -> None:
+    def parse(response: httpx.Response) -> tuple[pd.DataFrame, None]:
+        raise ServiceUnavailable("gateway", status_code=502, retry_after=3)
+
+    with pytest.raises(ServiceUnavailable, match=r"collecting 0 page\(s\)") as excinfo:
+        _walk_failing_on_page_two(404, parse=parse)
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.retry_after == 3
+
+
+def test_fanout_resumes_a_transient_failure_after_the_first_page() -> None:
+    """A typed mid-walk 503 is still a resumable interruption, not a bare error."""
+    first = _response(url="https://example.test/page/1")
+    client = mock.AsyncMock(spec=httpx.AsyncClient)
+    client.send.return_value = first
+    calls = {"n": 0}
+
+    def parse(response: httpx.Response) -> tuple[pd.DataFrame, str | None]:
+        is_first = str(response.url).endswith("/1")
+        return pd.DataFrame({"value": [1]}), ("next" if is_first else None)
+
+    async def follow(cursor: str, session: httpx.AsyncClient) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                503, request=httpx.Request("GET", "https://example.test/page/2")
+            )
+        return _response(url="https://example.test/page/2")
+
+    with pytest.raises(ServiceInterrupted) as excinfo:
+        run_paginated(
+            [httpx.Request("GET", first.url)],
+            parse_response=parse,
+            follow_up=follow,
+            raise_for_status=_raise_for_status,
+            service="test",
+            client=client,
+        )
+
+    assert isinstance(excinfo.value.__cause__, ServiceUnavailable)
+    assert excinfo.value.__cause__.status_code == 503
+    frame, _ = excinfo.value.call.resume()
+    assert len(frame) == 2
+
+
+def test_paginate_network_error_cause_keeps_retry_advice() -> None:
+    cause = NetworkError("Could not reach the service")
+    with pytest.raises(NetworkError) as excinfo:
+        _walk_failing_on_page_two(cause)
+
+    assert excinfo.value.retryable
+    assert "retry the request" in str(excinfo.value)
