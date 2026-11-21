@@ -318,7 +318,6 @@ class Test_BaseMetadata:
 
         assert not hasattr(md, "site_info")
         assert getattr(md, "site_info", "default") == "default"
-        assert "site_info" not in [n for n in dir(md) if hasattr(md, n)]
         with pytest.raises(AttributeError, match="site_info") as excinfo:
             _ = md.site_info
         message = str(excinfo.value)
