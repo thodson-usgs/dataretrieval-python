@@ -14,12 +14,14 @@ import httpx
 
 from dataretrieval import configuration as _configuration
 from dataretrieval._querying import _get_with_retry
+from dataretrieval._validation import require_one_of
 from dataretrieval.configuration import (
     BaseConfiguration,
     _Redirectable,
     _register,
     _Retrying,
 )
+from dataretrieval.exceptions import DataRetrievalError
 from dataretrieval.transport.http import HTTPX_DEFAULTS
 
 __all__ = [
@@ -31,6 +33,8 @@ __all__ = [
 ]
 
 STREAMSTATS_URL = "https://streamstats.usgs.gov/streamstatsservices"
+
+_WATERSHED_FORMATS = ("geojson", "object", "shape")
 
 
 def _service_base() -> str:
@@ -152,10 +156,13 @@ def get_watershed(
 
     Raises
     ------
+    ValueError
+        If ``format`` is not ``'geojson'``, ``'object'``, or ``'shape'``.
     NotImplementedError
         If ``format='shape'``, which is not yet implemented.
 
     """
+    require_one_of(format, _WATERSHED_FORMATS, name="format")
     payload: dict[str, str | int | float | bool] = {
         "rcode": rcode,
         "xlocation": xlocation,
@@ -182,7 +189,7 @@ def get_watershed(
             "parsed Watershed."
         )
 
-    # format == "object" (and any other value): parse into a Watershed.
+    # format == "object": parse into a Watershed.
     data = json.loads(r.text)
     return Watershed.from_streamstats_json(data)
 
@@ -234,11 +241,34 @@ class Watershed:
         return self
 
     def _populate(self, streamstats_json: dict[str, Any]) -> None:
-        """Extract watershed fields from ``streamstats_json`` onto this instance."""
-        self.watershed_point = streamstats_json["featurecollection"][0]["feature"]
-        self.watershed_polygon = streamstats_json["featurecollection"][1]["feature"]
-        self.parameters = streamstats_json["parameters"]
-        self._workspaceID = streamstats_json["workspaceID"]
+        """Extract watershed fields from ``streamstats_json`` onto this instance.
+
+        Raises
+        ------
+        DataRetrievalError
+            If the payload lacks the watershed fields, as an error body or a
+            changed response schema would.
+        """
+        try:
+            features = streamstats_json["featurecollection"]
+            point, polygon = features[0]["feature"], features[1]["feature"]
+            parameters = streamstats_json["parameters"]
+            workspace_id = streamstats_json["workspaceID"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise DataRetrievalError(
+                "The payload is not a StreamStats watershed: it needs "
+                "'featurecollection' (a point and a polygon), 'parameters', "
+                f"and 'workspaceID', and {type(exc).__name__} {exc} stopped "
+                "the read. Pass the parsed JSON of a "
+                "successful get_watershed(..., format='geojson') response "
+                "(json.loads(response.text)), or use "
+                "get_watershed(..., format='object') to fetch and parse in "
+                "one call."
+            ) from exc
+        self.watershed_point = point
+        self.watershed_polygon = polygon
+        self.parameters = parameters
+        self._workspaceID = workspace_id
 
 
 @dataclass(frozen=True)

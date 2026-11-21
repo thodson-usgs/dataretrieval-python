@@ -5,6 +5,7 @@ import json
 import pytest
 
 import dataretrieval
+from dataretrieval.exceptions import DataRetrievalError
 from dataretrieval.streamstats import Watershed, get_watershed
 
 # Minimal StreamStats watershed payload shaped like the service response
@@ -133,3 +134,19 @@ def test_get_sample_watershed_uses_the_documented_sample_location(monkeypatch):
 
     assert streamstats.get_sample_watershed() == "sentinel"
     assert captured == {"rcode": "NY", "x": -74.524, "y": 43.939, "format": "object"}
+
+
+def test_get_watershed_rejects_unknown_format_before_any_request(httpx_mock):
+    """A misspelled ``format`` used to fall through to JSON parsing and return a
+    ``Watershed``; it must raise, naming the valid options, without a request."""
+    with pytest.raises(ValueError, match=r"Invalid format: 'geojsn'.*geojson"):
+        get_watershed("NY", -74.524, 43.939, format="geojsn")
+    assert not httpx_mock.get_requests()
+
+
+@pytest.mark.parametrize("payload", [{}, {"featurecollection": []}, [], None])
+def test_watershed_from_unexpected_payload_raises_typed_error(payload):
+    """A payload without the watershed fields (an error body, a changed schema)
+    raises ``DataRetrievalError`` with a remedy, not a bare ``KeyError``."""
+    with pytest.raises(DataRetrievalError, match="not a StreamStats watershed"):
+        Watershed.from_streamstats_json(payload)
