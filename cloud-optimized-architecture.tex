@@ -1,10 +1,10 @@
-% The cloud-optimized architecture of PR #476, for one example query:
-% how get_continuous divides the query into chunks and where each chunk goes.
+% The cloud-optimized architecture of PR #476, for one example query: the
+% chunks the query becomes, colored by the endpoint each one is sent to.
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage[T1]{fontenc}
 \usepackage[scaled]{helvet}
 \renewcommand{\familydefault}{\sfdefault}
-\usetikzlibrary{arrows.meta,backgrounds}
+\usetikzlibrary{arrows.meta}
 
 \definecolor{api}{HTML}{1F5FA8}
 \definecolor{cat}{HTML}{C2620A}
@@ -16,100 +16,73 @@
 \begin{tikzpicture}[
   font=\sffamily\footnotesize,
   >={Stealth[length=2.2mm]},
-  stage/.style={draw, rounded corners=2pt, align=left, fill=white,
-    inner sep=4pt, text width=4.5cm},
-  chunk/.style={draw=#1, fill=#1!18, minimum height=3.6mm, inner sep=0pt,
-    font=\sffamily\scriptsize},
+  chunk/.style={draw=#1, fill=#1!18, minimum height=5mm, inner sep=0pt,
+    anchor=west},
   send/.style={->, thick, draw=#1},
+  count/.style={above, font=\sffamily\scriptsize},
   endpoint/.style={draw=#1, very thick, rounded corners=2pt, align=left,
-    fill=white, inner sep=4pt, text width=3.5cm},
-  title/.style={font=\sffamily\small\bfseries, anchor=west, text height=1.6ex, text depth=0.4ex},
-  tick/.style={font=\sffamily\scriptsize, anchor=south},
+    fill=white, inner sep=3pt, text width=2.0cm, anchor=west},
 ]
 
-% ----------------------------------------------------------- column titles
-\node[title] at (-0.1, 11.6) {one query};
-\node[title] at (5.9, 11.6) {its chunks};
-\node[title] at (15.3, 11.6) {endpoints};
+% --------------------------------------------------------------- the query
+\node[draw, rounded corners=2pt, align=left, inner sep=5pt,
+  font=\ttfamily\scriptsize] (q) at (2.5, 5.1)
+  {sites = [...]\ \ \# 50 locations\\[2pt]
+   df, md = waterdata.get\_continuous(\\
+   \ \ \ \ monitoring\_location\_id=sites,\\
+   \ \ \ \ parameter\_code="00060",\\
+   \ \ \ \ time="2025-01-01/..",\\
+   )};
 
-% ------------------------------------------------------------ the workflow
-\node[stage, font=\ttfamily\scriptsize] (q) at (2.4, 10.5)
-  {get\_continuous(\\
-   \ \ monitoring\_location\_id=[A, B, C],\\
-   \ \ parameter\_code="00060",\\
-   \ \ time="2025-01-01/..")};
-\node[stage, fill=black!5] (r) at (2.4, 8.9)
-  {\textbf{Router.} 3 locations $\times$ 96 values a day $\times$ 690 days
-   is about 200,000 rows: read the files.};
-\node[stage] (s1) at (2.4, 7.4)
-  {\textbf{1 Search the catalog.} The 3 ids fit one URL. Returns the URLs
-   of 6 files.};
-\node[stage] (s2) at (2.4, 4.6)
-  {\textbf{2 Download the files.} One chunk per file, sent concurrently.
-   $T$ is when the files were written.};
-\node[stage] (s3) at (2.4, 2.3)
-  {\textbf{3 Request the changes.} One chunk: the records at A, B, and C
-   that changed after $T$.};
-\node[stage, fill=black!5] (s4) at (2.4, 0.6)
-  {\textbf{4 Merge.} The API copy of a record replaces the file copy.};
-\foreach \a/\b in {q/r, r/s1, s1/s2, s2/s3, s3/s4}
-  \draw[->, thick] (\a) -- (\b);
+% one line from the query to each group of chunks
+\draw[thick] (q.east) -- (5.5, 5.1);
+\draw[thick] (5.5, 7.2) -- (5.5, 2.9);
+\draw[->, thick] (5.5, 7.2) -- (6.0, 7.2);
+\draw[->, thick] (5.5, 5.1) -- (5.85, 5.1);
+\draw[->, thick] (5.5, 2.9) -- (6.0, 2.9);
 
-% --------------------------------------------------------------- the chunks
-% time axis: 2025-01-01 at x=6, historical ends at 9, T at 10.6, now at 11.2
-\draw[black!60] (6, 6.3) -- (11.2, 6.3);
-\foreach \x/\t in {6/2025-01-01, 9/150 days ago, 10.6/$T$, 11.25/now} {
-  \draw[black!60] (\x, 6.22) -- (\x, 6.38);
-  \node[tick] at (\x, 6.38) {\t};
+% -------------------------------------------------------------- its chunks
+\node[chunk=cat, minimum width=9.6cm] at (6.0, 7.2)
+  {catalog search: sites 1 to 50};
+
+\draw[fil, thick, dashed, rounded corners=3pt] (5.85, 3.7) rectangle (15.75, 6.55);
+\node[font=\sffamily\scriptsize, text=black!70] at (8.8, 6.27) {historical file};
+\node[font=\sffamily\scriptsize, text=black!70] at (13.6, 6.27) {current file};
+\foreach \site/\y in {1/5.75, 2/5.15, 50/4.05} {
+  \node[chunk=fil, minimum width=5.6cm] at (6.0, \y)
+    {site \site: 2025-01-01 to 150 days ago};
+  \node[chunk=fil, minimum width=4.0cm] at (11.6, \y)
+    {site \site: 150 days ago to $T$};
 }
-\begin{scope}[on background layer]
-  \foreach \x in {6, 9, 10.6, 11.2}
-    \draw[black!35, dashed] (\x, 6.22) -- (\x, 1.95);
-\end{scope}
+\node at (8.8, 4.62) {$\vdots$};
+\node at (13.6, 4.62) {$\vdots$};
 
-\node[chunk=cat, minimum width=3cm, anchor=west] (c1) at (6, 7.4)
-  {search: ids A, B, C};
-
-\foreach \site/\y in {A/5.85, B/4.85, C/3.85} {
-  \node[chunk=fil, minimum width=3cm, anchor=west] (h\site) at (6, \y)
-    {\site\ \texttt{historical}};
-  \node[chunk=fil, minimum width=1.6cm, anchor=west] (c\site) at (9, \y-0.5)
-    {\site\ \texttt{current}};
-}
-
-\node[chunk=api, minimum width=5.2cm, anchor=west] (c3) at (6, 2.3)
-  {A, B, C: \texttt{last\_modified} $\ge T$};
-
-\node[draw, rounded corners=2pt, fill=black!5, minimum width=5.2cm,
-  minimum height=6mm, anchor=west] (df) at (6, 0.6)
-  {one DataFrame: A, B, C from 2025-01-01 to now};
-\draw[->, thick] (s4) -- (df);
+\node[chunk=api, minimum width=9.6cm] at (6.0, 2.9)
+  {sites 1 to 50: records changed after $T$};
+\node[anchor=north west, font=\sffamily\scriptsize, text=black!70]
+  at (6.0, 2.55) {$T$ is when the files were written.};
 
 % -------------------------------------------------------- the load balancer
 \draw[draw=black!60, fill=black!6, rounded corners=2pt]
-  (12.3, 1.7) rectangle (14.3, 8.0);
-\node[align=center, rotate=90] at (13.3, 4.85)
+  (17.35, 2.4) rectangle (18.35, 7.7);
+\node[align=center, rotate=90] at (17.85, 5.05)
   {\textbf{load balancer}\\api.waterdata.usgs.gov};
 
+\draw[send=cat] (15.6, 7.2) -- node[count] {1 chunk} (17.35, 7.2);
+\draw[send=fil] (15.75, 5.1) -- node[count] {100 chunks} (17.35, 5.1);
+\draw[send=api] (15.6, 2.9) -- node[count] {1 chunk} (17.35, 2.9);
+
 % ---------------------------------------------------------------- endpoints
-\node[endpoint=cat] (e1) at (17.2, 7.4)
+\node[endpoint=cat] (stac) at (18.85, 7.2)
   {\textbf{STAC catalog}\\\texttt{/stac/}};
-\node[endpoint=fil, minimum height=3.3cm] (e2) at (17.2, 4.6)
+\node[endpoint=fil] (files) at (18.85, 5.1)
   {\textbf{Parquet files}\\\texttt{/stac-files/}};
-\node[endpoint=api] (e3) at (17.2, 2.3)
+\node[endpoint=api] (ogc) at (18.85, 2.9)
   {\textbf{OGC API}\\\texttt{/ogcapi/}};
 
-% -------------------------------------------------------------------- sends
-\draw[send=cat] (c1.east) -- (12.3, 7.4);
-\draw[send=cat] (14.3, 7.4) -- (e1.west);
-\foreach \site/\y in {A/5.85, B/4.85, C/3.85} {
-  \draw[send=fil] (h\site.east) -- (12.3, \y);
-  \draw[send=fil] (14.3, \y) -- (e2.west |- 0, \y);
-  \draw[send=fil] (c\site.east) -- (12.3, \y-0.5);
-  \draw[send=fil] (14.3, \y-0.5) -- (e2.west |- 0, \y-0.5);
-}
-\draw[send=api] (c3.east) -- (12.3, 2.3);
-\draw[send=api] (14.3, 2.3) -- (e3.west);
+\draw[send=cat] (18.35, 7.2) -- (stac.west);
+\draw[send=fil] (18.35, 5.1) -- (files.west);
+\draw[send=api] (18.35, 2.9) -- (ogc.west);
 
 \end{tikzpicture}
 \end{document}
