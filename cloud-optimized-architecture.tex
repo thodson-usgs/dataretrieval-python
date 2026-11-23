@@ -1,11 +1,10 @@
-% The cloud-optimized architecture of PR #476: how get_daily and
-% get_continuous divide a query into chunks and route each chunk.
-% The edge hops are what the response headers showed on 2026-11-23.
+% The cloud-optimized architecture of PR #476, for one example query:
+% how get_continuous divides the query into chunks and where each chunk goes.
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage[T1]{fontenc}
 \usepackage[scaled]{helvet}
 \renewcommand{\familydefault}{\sfdefault}
-\usetikzlibrary{arrows.meta,backgrounds,calc,fit}
+\usetikzlibrary{arrows.meta,backgrounds}
 
 \definecolor{api}{HTML}{1F5FA8}
 \definecolor{cat}{HTML}{C2620A}
@@ -16,112 +15,101 @@
 \exhyphenpenalty=10000
 \begin{tikzpicture}[
   font=\sffamily\footnotesize,
-  >={Stealth[length=2.4mm]},
-  box/.style={draw, rounded corners=2pt, align=left, fill=white,
-    inner sep=4pt, text width=#1},
-  box/.default=3.6cm,
-  tile/.style={draw=#1, fill=#1!18, minimum width=4.2mm,
-    minimum height=4.2mm, inner sep=0pt},
-  flow/.style={->, very thick, draw=#1},
-  hop/.style={draw=black!55, fill=black!4, rounded corners=2pt},
-  frame/.style={draw=black!60, dashed, rounded corners=3pt,
-    minimum width=5.9cm, anchor=north west},
-  frametitle/.style={anchor=north west, align=left, text width=5.6cm},
-  title/.style={font=\sffamily\small\bfseries},
+  >={Stealth[length=2.2mm]},
+  stage/.style={draw, rounded corners=2pt, align=left, fill=white,
+    inner sep=4pt, text width=4.5cm},
+  chunk/.style={draw=#1, fill=#1!18, minimum height=3.6mm, inner sep=0pt,
+    font=\sffamily\scriptsize},
+  send/.style={->, thick, draw=#1},
+  endpoint/.style={draw=#1, very thick, rounded corners=2pt, align=left,
+    fill=white, inner sep=4pt, text width=3.5cm},
+  title/.style={font=\sffamily\small\bfseries, anchor=west, text height=1.6ex, text depth=0.4ex},
+  tick/.style={font=\sffamily\scriptsize, anchor=south},
 ]
 
-% ---------------------------------------------------------------- client
-\node[title, anchor=west] at (0, 11.1) {dataretrieval (client)};
+% ----------------------------------------------------------- column titles
+\node[title] at (-0.1, 11.6) {one query};
+\node[title] at (5.9, 11.6) {its chunks};
+\node[title] at (15.3, 11.6) {endpoints};
 
-\node[box=2.9cm] (call) at (1.55, 8.9)
-  {\texttt{get\_daily(...)}\\\texttt{get\_continuous(...)}};
-\node[box=2.9cm, fill=black!4] (router) at (1.55, 6.3)
-  {\textbf{router}, \texttt{bulk="auto"}\\[1pt]
-   estimates the rows from the arguments, and sends no request};
-\draw[->, thick] (call) -- (router);
+% ------------------------------------------------------------ the workflow
+\node[stage, font=\ttfamily\scriptsize] (q) at (2.4, 10.5)
+  {get\_continuous(\\
+   \ \ monitoring\_location\_id=[A, B, C],\\
+   \ \ parameter\_code="00060",\\
+   \ \ time="2025-01-01/..")};
+\node[stage, fill=black!5] (r) at (2.4, 8.9)
+  {\textbf{Router.} 3 locations $\times$ 96 values a day $\times$ 690 days
+   is about 200,000 rows: read the files.};
+\node[stage] (s1) at (2.4, 7.4)
+  {\textbf{1 Search the catalog.} The 3 ids fit one URL. Returns the URLs
+   of 6 files.};
+\node[stage] (s2) at (2.4, 4.6)
+  {\textbf{2 Download the files.} One chunk per file, sent concurrently.
+   $T$ is when the files were written.};
+\node[stage] (s3) at (2.4, 2.3)
+  {\textbf{3 Request the changes.} One chunk: the records at A, B, and C
+   that changed after $T$.};
+\node[stage, fill=black!5] (s4) at (2.4, 0.6)
+  {\textbf{4 Merge.} The API copy of a record replaces the file copy.};
+\foreach \a/\b in {q/r, r/s1, s1/s2, s2/s3, s3/s4}
+  \draw[->, thick] (\a) -- (\b);
 
-% the cloud-optimized path
-\node[frame, minimum height=6.4cm] (filesframe) at (3.75, 10.45) {};
-\node[frametitle] at (filesframe.north west)
-  {\textbf{files + changes}\\a large query the files can answer};
-
-\node[box] (s1) at (5.85, 9.1)
-  {\textbf{1} catalog search: ids split so each URL is $\le$ 2,094
-   characters};
-\node[box] (s2) at (5.85, 7.75)
-  {\textbf{2} download each file:\\\texttt{current}, \texttt{historical}};
-\node[box] (s3) at (5.85, 6.35)
-  {\textbf{3} change query: one OR clause per cutoff day, plus the
-   locations without a file};
-\node[box, fill=black!4] (s4) at (5.85, 4.85)
-  {\textbf{4} merge: the API copy of a record replaces the file copy};
-
-\foreach \i in {0,1} \node[tile=cat] at ($(8.05,9.1)+(\i*0.5,0)$) {};
-\foreach \i in {0,1,2} \node[tile=fil] at ($(8.05,7.75)+(\i*0.5,0)$) {};
-\foreach \i in {0,1,2} \node[tile=api] at ($(8.05,6.35)+(\i*0.5,0)$) {};
-
-% the API path
-\node[frame, minimum height=2.4cm] (apiframe) at (3.75, 3.7) {};
-\node[frametitle] at (apiframe.north west)
-  {\textbf{API only}\\a small query, or one only the API accepts};
-\node[box] (a1) at (5.85, 2.3)
-  {OGC chunk planner: lists and top-level OR, $\le$ 8 KB a request};
-\foreach \i in {0,1,2} \node[tile=api] at ($(8.05,2.3)+(\i*0.5,0)$) {};
-
-\draw[->, thick] (router.east) to[out=0, in=180] (filesframe.west |- s2);
-\draw[->, thick] (router.east) to[out=0, in=180] (apiframe.west |- a1);
-
-\node[align=left, anchor=north west, text width=9.6cm,
-  font=\sffamily\scriptsize] at (0, 1.05)
-  {Each numbered step and the API path send their chunks as one
-   \texttt{FanOut}: concurrent up to \texttt{API\_USGS\_CONCURRENT},
-   retried, and resumable with \texttt{exc.call.resume()}.};
-
-% ------------------------------------------------------------------ edge
-\node[title, anchor=west] at (10.25, 11.1)
-  {api.waterdata.usgs.gov (every request)};
-
+% --------------------------------------------------------------- the chunks
+% time axis: 2025-01-01 at x=6, historical ends at 9, T at 10.6, now at 11.2
+\draw[black!60] (6, 6.3) -- (11.2, 6.3);
+\foreach \x/\t in {6/2025-01-01, 9/150 days ago, 10.6/$T$, 11.25/now} {
+  \draw[black!60] (\x, 6.22) -- (\x, 6.38);
+  \node[tick] at (\x, 6.38) {\t};
+}
 \begin{scope}[on background layer]
-  \draw[hop] (10.3, 0.6) rectangle (12.4, 10.5);
-  \draw[hop] (12.8, 0.6) rectangle (14.9, 10.5);
-  \draw[hop] (15.3, 0.6) rectangle (17.4, 10.5);
+  \foreach \x in {6, 9, 10.6, 11.2}
+    \draw[black!35, dashed] (\x, 6.22) -- (\x, 1.95);
 \end{scope}
-\node[align=center, anchor=north] at (11.35, 10.4)
-  {\textbf{cloud.gov}\\load balancer\\and router};
-\node[align=center, anchor=north] at (13.85, 10.4)
-  {\textbf{api.data.gov}\\gateway};
-\node[align=center, anchor=north] at (16.35, 10.4)
-  {\textbf{CloudFront}\\and WAF};
-\node[align=center, anchor=south, font=\sffamily\scriptsize] at (11.35, 0.7)
-  {one host name\\for all three\\services};
-\node[align=center, anchor=south, font=\sffamily\scriptsize] at (13.85, 0.7)
-  {API key;\\one hourly\\count per key};
-\node[align=center, anchor=south, font=\sffamily\scriptsize] at (16.35, 0.7)
-  {HTTP 403 for a\\query string over\\2,048 bytes};
 
-% --------------------------------------------------------------- origins
-\node[title, anchor=west] at (17.95, 11.1) {origins, routed by path};
+\node[chunk=cat, minimum width=3cm, anchor=west] (c1) at (6, 7.4)
+  {search: ids A, B, C};
 
-\node[box=3.6cm, draw=cat, very thick] (o1) at (20.0, 9.1)
-  {\texttt{/stac/v0}\\STAC catalog\\ceiling 4,000 requests/h};
-\node[box=3.6cm, draw=fil, very thick] (o2) at (20.0, 7.75)
-  {\texttt{/stac-files}\\Parquet files in S3\\ceiling 10,000 requests/h};
-\node[box=3.6cm, draw=api, very thick, minimum height=4.9cm] (o3)
-  at (20.0, 4.3)
-  {\texttt{/ogcapi/v0}, \texttt{/ogcapi/v1}\\OGC API collections\\ceiling
-   1,000 requests/h};
-\node[draw=black!55, dashed, rounded corners=3pt, fit=(o1)(o3),
-  inner sep=5pt] (origins) {};
-\node[align=left, anchor=north west, text width=4.1cm,
-  font=\sffamily\scriptsize] at (origins.south west)
-  {What serves each path behind CloudFront is not visible from the
-   client.};
+\foreach \site/\y in {A/5.85, B/4.85, C/3.85} {
+  \node[chunk=fil, minimum width=3cm, anchor=west] (h\site) at (6, \y)
+    {\site\ \texttt{historical}};
+  \node[chunk=fil, minimum width=1.6cm, anchor=west] (c\site) at (9, \y-0.5)
+    {\site\ \texttt{current}};
+}
 
-% ----------------------------------------------------------------- flows
-\draw[flow=cat] (8.8, 9.1) -- (o1.west);
-\draw[flow=fil] (9.3, 7.75) -- (o2.west);
-\draw[flow=api] (9.3, 6.35) -- (o3.west |- 0, 6.35);
-\draw[flow=api] (9.3, 2.3) -- (o3.west |- 0, 2.3);
+\node[chunk=api, minimum width=5.2cm, anchor=west] (c3) at (6, 2.3)
+  {A, B, C: \texttt{last\_modified} $\ge T$};
+
+\node[draw, rounded corners=2pt, fill=black!5, minimum width=5.2cm,
+  minimum height=6mm, anchor=west] (df) at (6, 0.6)
+  {one DataFrame: A, B, C from 2025-01-01 to now};
+\draw[->, thick] (s4) -- (df);
+
+% -------------------------------------------------------- the load balancer
+\draw[draw=black!60, fill=black!6, rounded corners=2pt]
+  (12.3, 1.7) rectangle (14.3, 8.0);
+\node[align=center, rotate=90] at (13.3, 4.85)
+  {\textbf{load balancer}\\api.waterdata.usgs.gov};
+
+% ---------------------------------------------------------------- endpoints
+\node[endpoint=cat] (e1) at (17.2, 7.4)
+  {\textbf{STAC catalog}\\\texttt{/stac/}};
+\node[endpoint=fil, minimum height=3.3cm] (e2) at (17.2, 4.6)
+  {\textbf{Parquet files}\\\texttt{/stac-files/}};
+\node[endpoint=api] (e3) at (17.2, 2.3)
+  {\textbf{OGC API}\\\texttt{/ogcapi/}};
+
+% -------------------------------------------------------------------- sends
+\draw[send=cat] (c1.east) -- (12.3, 7.4);
+\draw[send=cat] (14.3, 7.4) -- (e1.west);
+\foreach \site/\y in {A/5.85, B/4.85, C/3.85} {
+  \draw[send=fil] (h\site.east) -- (12.3, \y);
+  \draw[send=fil] (14.3, \y) -- (e2.west |- 0, \y);
+  \draw[send=fil] (c\site.east) -- (12.3, \y-0.5);
+  \draw[send=fil] (14.3, \y-0.5) -- (e2.west |- 0, \y-0.5);
+}
+\draw[send=api] (c3.east) -- (12.3, 2.3);
+\draw[send=api] (14.3, 2.3) -- (e3.west);
 
 \end{tikzpicture}
 \end{document}
